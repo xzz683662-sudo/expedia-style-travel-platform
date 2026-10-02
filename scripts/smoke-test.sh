@@ -128,6 +128,7 @@ check "GET /api/v1/collections/trending works" "$(echo "$COLL" | jget '.title' |
 head2 "Product detail"
 DETAIL=$(curl -fsS "$API/api/v1/products/$FIRST_SLUG")
 check "GET /api/v1/products/:slug returns the product" "$(echo "$DETAIL" | jget '.slug' | grep -q "$FIRST_SLUG" && echo true || echo false)"
+PRODUCT_ID=$(echo "$DETAIL" | jget '.id')
 
 VARIANTS=$(echo "$DETAIL" | jget '.ticketTypes' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).length)}catch{console.log(0)}});")
 check "product exposes ticket variants (${VARIANTS:-0})" "$([ "${VARIANTS:-0}" -gt 0 ] && echo true || echo false)"
@@ -136,6 +137,20 @@ CANCEL_POLICY=$(echo "$DETAIL" | jget '.cancellationPolicy.freeCancelHours')
 check "product exposes a cancellation policy (${CANCEL_POLICY:-none}h)" "$([ -n "$CANCEL_POLICY" ] && [ "$CANCEL_POLICY" != "null" ] && echo true || echo false)"
 
 TICKET_TYPE_ID=$(echo "$DETAIL" | jget '.ticketTypes.0.id')
+
+head2 "Guest cart"
+GUEST_CART=$(curl -fsS "$API/api/v1/cart")
+GUEST_CART_TOKEN=$(echo "$GUEST_CART" | jget '.guestToken')
+check "GET /cart creates a guest cart capability" "$([ -n "$GUEST_CART_TOKEN" ] && [ "$GUEST_CART_TOKEN" != "null" ] && echo true || echo false)"
+
+GUEST_SERVICE_DATE=$(node -e "const d=new Date();d.setDate(d.getDate()+10);console.log(d.toISOString().slice(0,10));")
+GUEST_CART_ADD=$(curl -fsS -X POST "$API/api/v1/cart/items" \
+  -H 'Content-Type: application/json' \
+  -H "X-Cart-Token: $GUEST_CART_TOKEN" \
+  -d "{\"ticketTypeId\":\"$TICKET_TYPE_ID\",\"serviceDate\":\"$GUEST_SERVICE_DATE\",\"quantity\":1}")
+GUEST_CART_COUNT=$(echo "$GUEST_CART_ADD" | jget '.items' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).length)}catch{console.log(0)}});")
+check "guest can add an item without signing in" "$([ "${GUEST_CART_COUNT:-0}" -eq 1 ] && echo true || echo false)"
+check "adding to cart leaves it open without a stock hold" "$(echo "$GUEST_CART_ADD" | jget '.status' | grep -q '^OPEN$' && echo true || echo false)"
 
 head2 "Availability calendar"
 CAL=$(curl -fsS "$API/api/v1/products/$FIRST_SLUG/availability?days=30")
@@ -158,15 +173,37 @@ LOGIN=$(curl -fsS -X POST "$API/api/v1/auth/login" \
   -d "{\"email\":\"$EMAIL\",\"password\":\"Password123!\"}")
 check "POST /auth/login authenticates" "$(echo "$LOGIN" | jget '.token' | grep -qv 'null' && echo true || echo false)"
 
+head2 "Wishlist"
+WISHLIST_ADD=$(curl -fsS -X POST "$API/api/v1/wishlist" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"productId\":\"$PRODUCT_ID\"}")
+check "customer can save a product to the wishlist" "$(echo "$WISHLIST_ADD" | jget '.productId' | grep -q "$PRODUCT_ID" && echo true || echo false)"
+WISHLIST=$(curl -fsS "$API/api/v1/wishlist" -H "Authorization: Bearer $TOKEN")
+check "saved product appears in the wishlist" "$(echo "$WISHLIST" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).some(i=>i.productId==='$PRODUCT_ID'))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
+curl -fsS -X DELETE "$API/api/v1/wishlist/$PRODUCT_ID" -H "Authorization: Bearer $TOKEN" >/dev/null
+WISHLIST=$(curl -fsS "$API/api/v1/wishlist" -H "Authorization: Bearer $TOKEN")
+check "customer can remove a saved product" "$(echo "$WISHLIST" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(!JSON.parse(d).some(i=>i.productId==='$PRODUCT_ID'))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
+
 head2 "Checkout"
 # Pick a date ~10 days out so inventory exists.
 SERVICE_DATE=$(node -e "const d=new Date();d.setDate(d.getDate()+10);console.log(d.toISOString().slice(0,10));")
 
-ORDER=$(curl -fsS -X POST "$API/api/v1/orders" \
+USER_CART=$(curl -fsS "$API/api/v1/cart" -H "Authorization: Bearer $TOKEN")
+check "signed-in customer gets an open cart" "$(echo "$USER_CART" | jget '.status' | grep -q '^OPEN$' && echo true || echo false)"
+for _ in 1 2; do
+  USER_CART=$(curl -fsS -X POST "$API/api/v1/cart/items" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"ticketTypeId\":\"$TICKET_TYPE_ID\",\"serviceDate\":\"$SERVICE_DATE\",\"quantity\":1}")
+done
+USER_CART_COUNT=$(echo "$USER_CART" | jget '.items' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).length)}catch{console.log(0)}});")
+check "cart retains multiple independently selected lines" "$([ "${USER_CART_COUNT:-0}" -eq 2 ] && echo true || echo false)"
+
+ORDER=$(curl -fsS -X POST "$API/api/v1/cart/checkout" \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d "{
-    \"lines\":[{\"ticketTypeId\":\"$TICKET_TYPE_ID\",\"serviceDate\":\"$SERVICE_DATE\",\"quantity\":2}],
     \"contactEmail\":\"$EMAIL\",
     \"travelers\":[{\"fullName\":\"Smoke Test\",\"isLead\":true}]
   }")
@@ -174,7 +211,7 @@ ORDER=$(curl -fsS -X POST "$API/api/v1/orders" \
 ORDER_ID=$(echo "$ORDER" | jget '.orderId')
 ORDER_NUM=$(echo "$ORDER" | jget '.orderNumber')
 TOTAL_CENTS=$(echo "$ORDER" | jget '.totalCents')
-check "POST /orders creates a pending order ($ORDER_NUM)" "$([ -n "$ORDER_ID" ] && [ "$ORDER_ID" != "null" ] && echo true || echo false)"
+check "POST /cart/checkout creates a pending multi-line order ($ORDER_NUM)" "$([ -n "$ORDER_ID" ] && [ "$ORDER_ID" != "null" ] && echo true || echo false)"
 check "order total is positive (${TOTAL_CENTS:-0} cents)" "$([ "${TOTAL_CENTS:-0}" -gt 0 ] && echo true || echo false)"
 
 head2 "Inventory hold"
@@ -206,6 +243,22 @@ check "POST /orders/:id/pay captures payment (status=$PAY_STATUS)" "$(echo "$PAY
 DETAIL2=$(curl -fsS "$API/api/v1/orders/$ORDER_ID" -H "Authorization: Bearer $TOKEN")
 ORDER_STATUS=$(echo "$DETAIL2" | jget '.status')
 check "order transitions to CONFIRMED (${ORDER_STATUS:-none})" "$(echo "$ORDER_STATUS" | grep -q 'CONFIRMED' && echo true || echo false)"
+ORDER_LINE_COUNT=$(echo "$DETAIL2" | jget '.items' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).length)}catch{console.log(0)}});")
+check "multi-line cart becomes one order with two lines" "$([ "${ORDER_LINE_COUNT:-0}" -eq 2 ] && echo true || echo false)"
+
+head2 "Customer itinerary"
+ITINERARY=$(curl -fsS -X POST "$API/api/v1/itineraries" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"Smoke test trip","destinationSummary":"Test destination"}')
+ITINERARY_ID=$(echo "$ITINERARY" | jget '.id')
+check "customer can create a trip plan" "$([ -n "$ITINERARY_ID" ] && [ "$ITINERARY_ID" != "null" ] && echo true || echo false)"
+curl -fsS -X POST "$API/api/v1/itineraries/$ITINERARY_ID/items" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"orderId\":\"$ORDER_ID\",\"day\":2}" >/dev/null
+ITINERARIES=$(curl -fsS "$API/api/v1/itineraries" -H "Authorization: Bearer $TOKEN")
+check "confirmed booking appears in its selected trip day" "$(echo "$ITINERARIES" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const a=JSON.parse(d);console.log(a.some(p=>p.id==='$ITINERARY_ID'&&p.items.some(i=>i.orderId==='$ORDER_ID'&&i.day===2)))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
 
 TICKET_NUM=$(echo "$DETAIL2" | jget '.tickets.0.ticketNumber')
 check "an e-ticket was issued (${TICKET_NUM:-none})" "$([ -n "$TICKET_NUM" ] && [ "$TICKET_NUM" != "null" ] && echo true || echo false)"

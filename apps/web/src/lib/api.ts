@@ -41,6 +41,7 @@ type RequestOptions = {
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
   body?: unknown;
   token?: string | null;
+  headers?: Record<string, string>;
   /** Return `null` instead of throwing on 404 - handy for optional modules. */
   soft404?: boolean;
   cache?: RequestCache;
@@ -48,9 +49,9 @@ type RequestOptions = {
 };
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, token, soft404, cache, revalidate } = options;
+  const { method = 'GET', body, token, headers: extraHeaders, soft404, cache, revalidate } = options;
 
-  const headers: Record<string, string> = { Accept: 'application/json' };
+  const headers: Record<string, string> = { Accept: 'application/json', ...extraHeaders };
   if (body) headers['Content-Type'] = 'application/json';
   if (token) headers.Authorization = `Bearer ${token}`;
 
@@ -284,6 +285,65 @@ export type CheckoutResult = {
   currency: string;
   totalCents: number;
   holds: { holdToken: string; expiresAt: string }[];
+};
+
+export type CartItem = {
+  id: string;
+  productId: string;
+  slug: string;
+  productType: string;
+  title: string;
+  imageUrl: string | null;
+  ticketTypeId: string;
+  optionName: string;
+  serviceDate: string;
+  timeSlot: string | null;
+  quantity: number;
+  minPerOrder: number;
+  maxPerOrder: number;
+  unitPriceCents: number;
+  currency: string;
+  lineTotalCents: number;
+};
+
+export type Cart = {
+  id: string;
+  currency: string;
+  status: string;
+  items: CartItem[];
+  guestToken?: string;
+};
+
+export type WishlistItem = {
+  productId: string;
+  slug: string;
+  title: string;
+  imageUrl: string | null;
+  serviceDate: string | null;
+  createdAt: string;
+};
+
+export type ItineraryItem = {
+  id: string;
+  orderId: string | null;
+  productId: string | null;
+  day: number;
+  position: number;
+  title: string;
+  notes: string | null;
+  costCents: number;
+};
+
+export type Itinerary = {
+  id: string;
+  name: string;
+  destinationSummary: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  totalCents: number;
+  itemCount: number;
+  isPublic: boolean;
+  items: ItineraryItem[];
 };
 
 export type OrderSummary = {
@@ -712,6 +772,108 @@ export const api = {
     market?: string;
     channel?: string;
   }, token?: string | null) => request<CheckoutResult>('/orders', { method: 'POST', body, token }),
+
+  cart: (
+    token?: string | null,
+    guestToken?: string | null,
+    locale: LocaleCode = DEFAULT_LOCALE,
+  ) =>
+    request<Cart>(`/cart${toQuery(withLocale({}, locale))}`, {
+      token,
+      headers: guestToken ? { 'X-Cart-Token': guestToken } : undefined,
+      cache: 'no-store',
+    }),
+
+  addCartItem: (
+    body: { ticketTypeId: string; serviceDate: string; timeSlot?: string | null; quantity: number },
+    token?: string | null,
+    guestToken?: string | null,
+    locale: LocaleCode = DEFAULT_LOCALE,
+  ) =>
+    request<Cart>(`/cart/items${toQuery(withLocale({}, locale))}`, {
+      method: 'POST',
+      body,
+      token,
+      headers: guestToken ? { 'X-Cart-Token': guestToken } : undefined,
+      cache: 'no-store',
+    }),
+
+  updateCartItem: (
+    id: string,
+    body: { quantity: number },
+    token?: string | null,
+    guestToken?: string | null,
+    locale: LocaleCode = DEFAULT_LOCALE,
+  ) =>
+    request<Cart>(`/cart/items/${encodeURIComponent(id)}${toQuery(withLocale({}, locale))}`, {
+      method: 'PATCH',
+      body,
+      token,
+      headers: guestToken ? { 'X-Cart-Token': guestToken } : undefined,
+      cache: 'no-store',
+    }),
+
+  removeCartItem: (
+    id: string,
+    token?: string | null,
+    guestToken?: string | null,
+    locale: LocaleCode = DEFAULT_LOCALE,
+  ) =>
+    request<Cart>(`/cart/items/${encodeURIComponent(id)}${toQuery(withLocale({}, locale))}`, {
+      method: 'DELETE',
+      token,
+      headers: guestToken ? { 'X-Cart-Token': guestToken } : undefined,
+      cache: 'no-store',
+    }),
+
+  checkoutCart: (
+    body: {
+      contactEmail: string;
+      contactPhone?: string;
+      customerNote?: string;
+      couponCode?: string;
+      travelers?: { fullName: string; email?: string }[];
+    },
+    token?: string | null,
+    guestToken?: string | null,
+    locale: LocaleCode = DEFAULT_LOCALE,
+  ) =>
+    request<CheckoutResult>(`/cart/checkout${toQuery(withLocale({}, locale))}`, {
+      method: 'POST',
+      body,
+      token,
+      headers: guestToken ? { 'X-Cart-Token': guestToken } : undefined,
+      cache: 'no-store',
+    }),
+
+  // --- Customer trip tools ---
+  wishlist: (token: string) =>
+    request<WishlistItem[]>('/wishlist', { token, cache: 'no-store' }),
+
+  addWishlistItem: (body: { productId: string; serviceDate?: string }, token: string) =>
+    request<{ id: string; productId: string; serviceDate: string | null }>('/wishlist', { method: 'POST', body, token }),
+
+  removeWishlistItem: (productId: string, token: string) =>
+    request<{ removed: boolean }>(`/wishlist/${encodeURIComponent(productId)}`, { method: 'DELETE', token }),
+
+  itineraries: (token: string) =>
+    request<Itinerary[]>('/itineraries', { token, cache: 'no-store' }),
+
+  createItinerary: (
+    body: { name: string; destinationSummary?: string; startDate?: string; endDate?: string },
+    token: string,
+  ) => request<Itinerary>('/itineraries', { method: 'POST', body, token }),
+
+  addOrderToItinerary: (
+    itineraryId: string,
+    body: { orderId: string; day?: number; notes?: string },
+    token: string,
+  ) =>
+    request<ItineraryItem[]>(`/itineraries/${encodeURIComponent(itineraryId)}/items`, {
+      method: 'POST',
+      body,
+      token,
+    }),
 
   payOrder: (
     orderId: string,

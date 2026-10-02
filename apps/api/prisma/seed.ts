@@ -46,6 +46,7 @@ import { COUPONS, PRODUCTS } from './seed-products';
 // ---------------------------------------------------------------------------
 
 const INVENTORY_WINDOW_DAYS = 120;
+const includeDemoData = process.env.SEED_DEMO_DATA !== 'false';
 
 function priceRuleKind(kind: SeedPriceRule['kind']): PriceRuleKind {
   return kind as PriceRuleKind;
@@ -422,28 +423,30 @@ async function main() {
       });
     }
 
-    // --- Reviews + rating aggregates -------------------------------------
-    const customer = await ensureCustomer();
-    await prisma.review.deleteMany({ where: { productId: product.id, userId: customer.id } });
+    if (includeDemoData) {
+      // --- Reviews + rating aggregates -----------------------------------
+      const customer = await ensureCustomer();
+      await prisma.review.deleteMany({ where: { productId: product.id, userId: customer.id } });
 
-    for (const review of definition.reviews ?? []) {
-      await prisma.review.create({
-        data: {
-          productId: product.id,
-          userId: customer.id,
-          rating: review.rating,
-          title: review.title,
-          body: review.body,
-          locale: review.locale ?? 'en',
-          status: ReviewStatus.PUBLISHED,
-          helpfulCount: review.helpfulCount ?? Math.floor(Math.random() * 24),
-          visitedAt: new Date(Date.now() - review.daysAgo * 86_400_000),
-          createdAt: new Date(Date.now() - review.daysAgo * 86_400_000),
-        },
-      });
+      for (const review of definition.reviews ?? []) {
+        await prisma.review.create({
+          data: {
+            productId: product.id,
+            userId: customer.id,
+            rating: review.rating,
+            title: review.title,
+            body: review.body,
+            locale: review.locale ?? 'en',
+            status: ReviewStatus.PUBLISHED,
+            helpfulCount: review.helpfulCount ?? Math.floor(Math.random() * 24),
+            visitedAt: new Date(Date.now() - review.daysAgo * 86_400_000),
+            createdAt: new Date(Date.now() - review.daysAgo * 86_400_000),
+          },
+        });
+      }
+
+      await recomputeRatings(product.id);
     }
-
-    await recomputeRatings(product.id);
   }
 
   logger.info('seed.products', { products: productCount, ticketTypes: ticketTypeCount, inventoryRows: inventoryCount });
@@ -538,14 +541,14 @@ async function main() {
   }
 
   // -------------------------------------------------------------------------
-  // 7. Demo orders (paid, with issued tickets) so the console has data
+  // 7. Demo data is opt-in for hosted databases.
   // -------------------------------------------------------------------------
-  await seedDemoOrders();
-
-  // -------------------------------------------------------------------------
-  // 8. Staff accounts
-  // -------------------------------------------------------------------------
-  await ensureStaff();
+  if (includeDemoData) {
+    await seedDemoOrders();
+    await ensureStaff();
+  } else {
+    logger.info('seed.demo_data_skipped');
+  }
 
   // -------------------------------------------------------------------------
   // 9. Promo banners so the storefront strip has something to render

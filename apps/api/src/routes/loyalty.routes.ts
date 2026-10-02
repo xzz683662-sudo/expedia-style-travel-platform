@@ -117,6 +117,16 @@ export async function itineraryRoutes(app: FastifyInstance): Promise<void> {
       totalCents: it.totalCents,
       itemCount: it._count.items,
       isPublic: it.isPublic,
+      items: it.items.map((item) => ({
+        id: item.id,
+        orderId: item.orderId,
+        productId: item.productId,
+        day: item.day,
+        position: item.position,
+        title: item.title,
+        notes: item.notes,
+        costCents: item.costCents,
+      })),
     }));
   });
 
@@ -131,6 +141,10 @@ export async function itineraryRoutes(app: FastifyInstance): Promise<void> {
       })
       .parse(request.body);
 
+    if (body.startDate && body.endDate && body.endDate < body.startDate) {
+      throw AppError.validation('The trip end date must be on or after its start date');
+    }
+
     const itinerary = await prisma.itinerary.create({
       data: {
         userId: user.id,
@@ -142,7 +156,7 @@ export async function itineraryRoutes(app: FastifyInstance): Promise<void> {
       },
     });
 
-    return reply.status(201).send(itinerary);
+    return reply.status(201).send({ ...itinerary, itemCount: 0, items: [] });
   });
 
   /** Append a confirmed order to a trip plan - the "build my itinerary" flow. */
@@ -159,6 +173,14 @@ export async function itineraryRoutes(app: FastifyInstance): Promise<void> {
       'Order',
     );
     if (order.userId !== user.id) throw AppError.forbidden();
+    if (order.status !== 'CONFIRMED' && order.status !== 'COMPLETED') {
+      throw AppError.conflict('Only confirmed bookings can be added to a trip plan');
+    }
+    const alreadyAdded = await prisma.itineraryItem.findFirst({
+      where: { itineraryId: itinerary.id, orderId: order.id },
+      select: { id: true },
+    });
+    if (alreadyAdded) throw AppError.conflict('This booking is already in the trip plan');
 
     const created = await prisma.$transaction(async (tx) => {
       const items = [];

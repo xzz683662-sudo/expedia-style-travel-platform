@@ -296,6 +296,7 @@ model Product {
   privateDeparture  Boolean @default(false) // bookable as an exclusive, private use
 
   ticketTypes    TicketType[]
+  cartItems      CartItem[]
   media          ProductMedia[]
   priceRules     PriceRule[]
   tags           ProductTag[]
@@ -690,6 +691,7 @@ model SearchQueryLog {
 
 enum CartStatus {
   OPEN
+  CHECKOUT
   CONVERTED
   EXPIRED
   ABANDONED
@@ -699,6 +701,7 @@ model Cart {
   id        String     @id @default(cuid())
   userId    String?
   status    CartStatus @default(OPEN)
+  guestTokenHash String? @unique
   currency  String     @default("USD")
   locale    String     @default("en-US")
   promoCode String?
@@ -716,6 +719,7 @@ model CartItem {
   cartId         String
   cart           Cart       @relation(fields: [cartId], references: [id], onDelete: Cascade)
   productId      String
+  product        Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
   ticketTypeId   String
   ticketType     TicketType @relation(fields: [ticketTypeId], references: [id])
   serviceDate    DateTime   @db.Date

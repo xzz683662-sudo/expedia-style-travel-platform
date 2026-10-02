@@ -16,6 +16,7 @@ import { optionalAuth } from './plugins/auth';
 import { registerErrorHandler } from './plugins/error-handler';
 import { adminRoutes } from './routes/admin.routes';
 import { authRoutes } from './routes/auth.routes';
+import { cartRoutes } from './routes/cart.routes';
 import { itineraryRoutes, loyaltyRoutes } from './routes/loyalty.routes';
 import { notificationRoutes } from './routes/notifications.routes';
 import { orderRoutes } from './routes/orders.routes';
@@ -150,6 +151,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(searchRoutes, { prefix: '/api/v1' });
   await app.register(productRoutes, { prefix: '/api/v1' });
   await app.register(authRoutes, { prefix: '/api/v1' });
+  await app.register(cartRoutes, { prefix: '/api/v1' });
   await app.register(orderRoutes, { prefix: '/api/v1' });
   await app.register(ticketingRoutes, { prefix: '/api/v1' });
   await app.register(socialRoutes, { prefix: '/api/v1' });

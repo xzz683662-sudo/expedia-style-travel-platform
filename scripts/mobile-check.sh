@@ -117,12 +117,18 @@ done
 # ---------------------------------------------------------------------------
 head2 "Server-rendered HTML"
 
-for path in / /search /loyalty /tickets /orders /admin /admin/finance; do
+for path in / /search /cart /wishlist /itineraries /checkout /loyalty /tickets /orders /admin /admin/finance; do
+  # /checkout redirects anonymous visitors to sign-in, so 307 is a healthy
+  # response for it — the route exists and the auth gate is doing its job.
+  case "$path" in
+    /checkout) expected="200 307" ;;
+    *)         expected="200" ;;
+  esac
   code="$(curl -s -o /dev/null -w '%{http_code}' "$WEB_URL$path" || echo 000)"
-  if [[ "$code" == "200" ]]; then
-    ok "$path responds 200"
+  if [[ " $expected " == *" $code "* ]]; then
+    ok "$path responds $code"
   else
-    bad "$path responded $code"
+    bad "$path responded $code (expected $expected)"
   fi
 done
 

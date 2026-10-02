@@ -218,7 +218,7 @@ export async function socialRoutes(app: FastifyInstance): Promise<void> {
     const item = await prisma.wishlistItem.upsert({
       where: { userId_productId: { userId: user.id, productId: body.productId } },
       create: { userId: user.id, productId: body.productId, serviceDate: body.serviceDate ? new Date(`${body.serviceDate}T00:00:00Z`) : null },
-      update: { serviceDate: body.serviceDate ? new Date(`${body.serviceDate}T00:00:00Z`) : null },
+      update: body.serviceDate ? { serviceDate: new Date(`${body.serviceDate}T00:00:00Z`) } : {},
     });
     return item;
   });
@@ -242,6 +242,7 @@ export async function socialRoutes(app: FastifyInstance): Promise<void> {
       slug: item.product.slug,
       title: item.product.translations[0]?.name ?? item.product.slug,
       imageUrl: item.product.media[0]?.url ?? null,
+      serviceDate: item.serviceDate?.toISOString().slice(0, 10) ?? null,
       createdAt: item.createdAt,
     }));
   });

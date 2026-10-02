@@ -2,8 +2,9 @@
 
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import type { ProductDetail } from '@/lib/api';
+import { api, ApiError, type ProductDetail } from '@/lib/api';
 import { formatDate, formatMoney, relativeDay } from '@/lib/format';
+import { readCartToken, readToken, saveCartToken } from '@/lib/session';
 import type { LocaleCode } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 
@@ -34,6 +35,8 @@ export function BookingPanel({
   const [quantity, setQuantity] = useState(Math.min(Math.max(1, initialQuantity), product.ticketTypes[0]?.maxPerOrder ?? 1));
   const [coupon, setCoupon] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [cartMessage, setCartMessage] = useState<string | null>(null);
+  const [cartError, setCartError] = useState<string | null>(null);
 
   const selected = product.ticketTypes.find((t) => t.id === ticketTypeId) ?? product.ticketTypes[0];
 
@@ -77,6 +80,32 @@ export function BookingPanel({
     });
     if (coupon.trim()) params.set('coupon', coupon.trim());
     router.push(`/checkout?${params.toString()}`);
+  }
+
+  async function addToCart() {
+    setSubmitting(true);
+    setCartError(null);
+    setCartMessage(null);
+    try {
+      const token = readToken();
+      let cartToken = readCartToken();
+      const cart = await api.cart(token, cartToken, locale);
+      if (cart.guestToken) {
+        cartToken = cart.guestToken;
+        saveCartToken(cartToken);
+      }
+      await api.addCartItem(
+        { ticketTypeId: selected.id, serviceDate: selectedDate, quantity },
+        token,
+        cartToken,
+        locale,
+      );
+      setCartMessage(t('product.addedToCart'));
+    } catch (caught) {
+      setCartError(caught instanceof ApiError ? caught.message : t('cart.couldNotLoad'));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   const offPercent =
@@ -244,6 +273,16 @@ export function BookingPanel({
       <button className="btn btn-accent btn-lg btn-block" onClick={checkout} disabled={submitting}>
         {submitting ? t('product.preparingCheckout') : t('product.reserveAndPay')}
       </button>
+
+      <button className="btn btn-secondary btn-block" onClick={addToCart} disabled={submitting}>
+        {t('product.addToCart')}
+      </button>
+      {cartMessage && (
+        <p className="tiny center" role="status">
+          {cartMessage} · <a href="/cart">{t('nav.cart')}</a>
+        </p>
+      )}
+      {cartError && <p className="form-error" role="alert">{cartError}</p>}
 
       <p className="tiny subtle center">
         {t('product.notChargedYet', product.cancellationPolicy?.freeCancelHours ?? 24)}

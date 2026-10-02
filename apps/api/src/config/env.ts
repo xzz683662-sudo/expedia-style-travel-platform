@@ -48,7 +48,7 @@ function num(key: string, fallback: number): number {
 
 export const config = {
   env: str('NODE_ENV', 'development'),
-  port: int('API_PORT', 4000),
+  port: int('PORT', int('API_PORT', 4000)),
   host: str('API_HOST', '0.0.0.0'),
   publicUrl: str('API_PUBLIC_URL', `http://localhost:${int('API_PORT', 4000)}`),
 

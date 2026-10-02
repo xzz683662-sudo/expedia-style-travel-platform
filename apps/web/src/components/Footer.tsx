@@ -16,6 +16,7 @@ const GROUPS = [
     titleKey: 'nav.experiences' as const,
     items: [
       { key: 'nav.experiences' as const, href: '/search' },
+      { key: 'nav.cart' as const, href: '/cart' },
       { key: 'nav.trending' as const, href: '/collections/trending' },
       { key: 'home.skipTheLine' as const, href: '/collections/skip-the-line' },
       { key: 'nav.freeCancellation' as const, href: '/collections/free-cancellation' },
