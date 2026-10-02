@@ -308,6 +308,15 @@ model Product {
   contracts      ProductContract[]
   availability   AvailabilityCalendar[]
 
+  // Category extensions (Phase 0). At most one is populated, selected by
+  // `type`. Nullable by design: `prisma db push` cannot add a required
+  // relation on a table that already holds rows, and every read path treats
+  // these as optional.
+  stay    ProductStay?
+  flight  ProductFlight?
+  sailing ProductSailing?
+  vehicle ProductVehicle?
+
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
   publishedAt DateTime?
@@ -602,6 +611,23 @@ model InventoryRecord {
   // "" = all-day / no time slot. Kept non-null so the composite unique key is
   // usable from Prisma's typed where API (it cannot express nullable keys).
   timeSlot      String  @default("") // "09:00", "13:30" or "" for all-day
+  // Generic inventory dimension, added in Phase 0.
+  //
+  // `timeSlot` above only models *time of day*, which is enough for tours and
+  // attraction slots but cannot express the other categories: a hotel sells a
+  // room type on a date, a cruise sells a cabin category on a sailing, a car
+  // rental sells a vehicle class over a pickup window. Renaming `timeSlot` was
+  // rejected — 111 call sites depend on it across 16 files, including the whole
+  // booking path.
+  //
+  // So this is additive. Resolution order for any inventory lookup:
+  //   1. `dimensionKey` when non-empty (category-aware, wins)
+  //   2. `timeSlot`     when non-empty (legacy time-of-day slot)
+  //   3. ""              (all-day / undifferentiated)
+  //
+  // Existing rows keep `dimensionKey = ""` and therefore keep working exactly
+  // as before; new category-aware rows opt in explicitly.
+  dimensionKey   String  @default("")
   capacityTotal Int
   capacityHeld  Int             @default(0)
   capacitySold  Int             @default(0)
@@ -613,9 +639,21 @@ model InventoryRecord {
 
   holds InventoryHold[]
 
+  // A row may be constrained by both. A unique on (type, date, timeSlot)
+  // already exists and is preserved.
+  //
+  // `dimensionKey` deliberately has NO unique constraint. Making it unique
+  // alongside `timeSlot` would reject the existing data: 19,560 (ticketType,
+  // date) pairs legitimately differ only by `timeSlot` (e.g. "Departure 21:40"
+  // vs "Departure 23:15"), and with every `dimensionKey = ""` the new key would
+  // collide on all of them. Enforcing uniqueness is left to the service layer,
+  // which writes `dimensionKey` only for category-aware inventory and can
+  // enforce "one row per (ticketType, date, dimension)" inside a transaction
+  // where it also holds the optimistic lock.
   @@unique([ticketTypeId, serviceDate, timeSlot])
   @@index([serviceDate])
   @@index([status, serviceDate])
+  @@index([ticketTypeId, serviceDate, dimensionKey])
 }
 
 // Cached "is there anything bookable on this day" bitmap for calendar UI.
@@ -662,10 +700,40 @@ model SearchDocument {
   freeCancellation Boolean       @default(false)
   skipTheLine      Boolean       @default(false)
   status           ProductStatus @default(DRAFT)
-  indexedAt        DateTime      @updatedAt
+
+  // --- Category-aware facets (Phase 0) ------------------------------------
+  // `search/service.ts` has always described intent along the lines of "a
+  // flight the route and cabin, a hotel the star rating and board basis", but
+  // only `cabinClass` ever made it into this document. These columns give the
+  // indexer a real place to put the rest.
+  //
+  // All nullable and all additive: the columns below are populated from the
+  // display columns already on `Product`, so no product needs new authoring to
+  // gain them.
+  starRating     Int?    // HOTEL_ROOM: official stars
+  boardBasis     String? // HOTEL_ROOM: "Breakfast included"
+  roomCategory   String? // HOTEL_ROOM: "Deluxe King"
+  carrierCode    String? // FLIGHT: 2-letter IATA marketing carrier
+  carrierName    String? // FLIGHT: "Singapore Airlines"
+  routeSummary   String? // FLIGHT: "SIN → JFK"
+  segmentCount   Int?    // FLIGHT: number of sectors
+  cabinClasses   String[] @default([]) // FLIGHT: distinct cabins sold
+  shipName       String? // CRUISE
+  cruiseLine     String? // CRUISE
+  nights         Int?    // CRUISE / multi-day packages
+  destinationPort String? // CRUISE: embarkation port
+
+  /// Escape hatch for facets that have not earned a column yet.
+  /// Mirrors the Json used by the Phase 0 category extension tables.
+  attributes Json @default("{}")
+
+  indexedAt        DateTime @updatedAt
 
   @@index([type, status])
   @@index([countryCode])
+  @@index([type, starRating])
+  @@index([type, carrierCode])
+  @@index([type, shipName])
 }
 
 model SearchQueryLog {
@@ -1622,4 +1690,170 @@ model PromoBanner {
 
   @@index([slot, isActive, sortOrder])
   @@index([startsAt, endsAt])
+}
+
+// ---------------------------------------------------------------------------
+// Category extension tables (Phase 0)
+//
+// Why 1:1 extension tables instead of widening `Product` further:
+//
+// `Product` already carries a dozen nullable display columns (`airlineName`,
+// `roomCategory`, `shipName`, ...). That was the right call for rendering one
+// card template, but it cannot express *structure*: a hotel needs a stay range
+// and a room inventory grid, a flight needs ordered segments, a cruise needs a
+// sailing and its cabin categories. Those are records, not strings.
+//
+// So the columns stay where they are (display + backwards compatibility) and
+// anything that needs its own identity or relational shape moves into a table
+// keyed 1:1 by `productId`. Nothing on the `Product -> TicketType` booking path
+// changes, so existing inventory, holds, carts and orders keep working.
+//
+// Populate `backfillCategoryExtensions()` in the seed to derive these from the
+// existing display columns. Until then the optional `stay`/`flight`/`sailing`
+// relations on `Product` are simply null and every read path must tolerate that.
+// ---------------------------------------------------------------------------
+
+/// Accommodation: a bookable property/stay at a hotel, resort or apartment.
+model ProductStay {
+  productId String  @id
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  propertyType String  @default("HOTEL") // HOTEL | RESORT | APARTMENT | VILLA
+  starRating   Int? // official stars, 1-5. Mirrors Product.starCategory on backfill.
+  brand        String?
+  chainCode    String?
+
+  checkInTime  String  @default("15:00") // local time at the property
+  checkOutTime String  @default("11:00")
+
+  /// Per-room-type sellable variants. Each entry is one inventory dimension:
+  /// { code, name, beds, maxOccupancy, sizeSqm, smoking, amenities[] }
+  ///
+  /// Kept as Json rather than a child table because room types are always read
+  /// and written as a unit with their parent stay, are never queried across
+  /// products, and need no independent lifecycle. Normalise this only if
+  /// cross-property room search (min price across dates) becomes a real query.
+  roomTypes Json @default("[]")
+
+  /// Stay-wide conditions that are not per-room:
+  /// { depositCents, depositReleaseDays, petFeeCents, smokingAllowed,
+  ///   minNights, maxNights, childrenPolicy }
+  policies Json @default("{}")
+
+  /// Free-form localisations of room-type names/amenities keyed by locale.
+  roomTypeTranslations Json @default("{}")
+
+  updatedAt DateTime @updatedAt
+
+  @@index([propertyType])
+  @@index([starRating])
+}
+
+/// Air travel: one itinerary (a marketing carrier's dated, priced product).
+model ProductFlight {
+  productId String  @id
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  marketingCarrier  String // IATA or marketing name, e.g. "BA"
+  operatingCarrier  String?
+  marketingCarrierCode String? // 2-letter IATA when known
+  alliance           String? // oneworld | SkyTeam | Star Alliance | null
+
+  /// Number of sectors on the default itinerary, cached for cheap filtering.
+  segmentCount Int @default(1)
+
+  /// Ordered legs. Each entry:
+  /// { seq, marketingCarrier, operatingCarrier?, flightNumber, aircraft,
+  ///   departure: { airport, terminal?, scheduledAt, actualAt?, offset },
+  ///   arrival:   { airport, terminal?, scheduledAt, actualAt?, offset },
+  ///   durationMinutes, cabinCode, bookingClass, fareFamily }
+  ///
+  /// Ordered segments genuinely need sequence and cross-leg queries, which a
+  /// Json blob makes awkward to index. This is the first candidate for a real
+  /// `FlightSegment` table if itinerary search or rebooking lands.
+  segments Json @default("[]")
+
+  /// Sellable fare families. Each entry:
+  /// { code, name, cabinCode, bookingClass, baggage { carryOn, checked },
+  ///   changeFeeCents?, refundable, refundFeeCents?, minStayDays?, maxStayDays?,
+  ///   conditions }
+  fareFamilies Json @default("[]")
+
+  /// Cabin metadata: { code, name, bags { carryOn, checked }, seatPitchMm? }
+  cabins Json @default("[]")
+
+  /// { minConnectMinutes, maxConnectMinutes, validOn, fareBasisRequired }
+  ticketingRules Json @default("{}")
+
+  updatedAt DateTime @updatedAt
+
+  @@index([marketingCarrier])
+  @@index([segmentCount])
+}
+
+/// Cruise: one sailing of a ship, including its port itinerary and cabins.
+model ProductSailing {
+  productId String  @id
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  shipName String
+  lineName String
+  lineCode String?
+  shipCode String? // e.g. "VGR"
+
+  /// ISO date of departure from the first port.
+  sailDate DateTime? @db.Date
+  /// Nights; mirrors Product.cruiseNights on backfill.
+  nights Int?
+  /// Where the ship actually ends — differs from `sailDate` port for round trips.
+  returnPort String?
+
+  /// Embarkation port and the cut-off for boarding.
+  embarkationPort String?
+  embarkationClosesAt DateTime?
+
+  /// Ordered calls. Each entry:
+  /// { day, port, country?, arrivalAt?, departureAt?, tender?, overnight? }
+  ports Json @default("[]")
+
+  /// { code, name, deckFrom, deckTo, beds { standard, max }, sizeSqm?,
+  ///   window, accessible }
+  cabinCategories Json @default("[]")
+
+  /// { diningPlanCodes[], drinkPlanCodes[], gratuityIncluded, wifiIncluded }
+  inclusions Json @default("{}")
+
+  updatedAt DateTime @updatedAt
+
+  @@index([shipName])
+  @@index([sailDate])
+  @@index([nights])
+}
+
+/// Ground transport: vehicle rental or a bookable transfer service.
+model ProductVehicle {
+  productId String  @id
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// RENTAL_CAR | TRANSFER | AIRPORT_TRANSFER | VEHICLE_RENTAL
+  serviceKind String
+
+  /// Rental only. { or similar:
+  ///   { code, name, orSimilar, seats, luggage, doors, transmission,
+  ///     fuelPolicy, airConditioning, categories[], supplier? }
+  vehicleClasses Json @default("[]")
+
+  /// Transfer only: pickup/dropoff pairs, meet & greet, flight tracking.
+  transferOptions Json @default("{}")
+
+  /// Rental only: { minDriverAge, minLicenseYears, youngDriverSurchargeCents,
+  ///   additionalDriverFeeCents, oneWayFeeCents, maxRentalDays }
+  rentalPolicy Json @default("{}")
+
+  /// { providers[], mileageIncludedKm, fuelPolicy, crossBorderAllowed }
+  supplyPolicy Json @default("{}")
+
+  updatedAt DateTime @updatedAt
+
+  @@index([serviceKind])
 }

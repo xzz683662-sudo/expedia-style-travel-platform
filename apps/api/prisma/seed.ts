@@ -40,6 +40,7 @@ import { indexProduct } from '../src/modules/search/service';
 import { refreshAvailabilityCalendar } from '../src/modules/search/service';
 import { DESTINATIONS, MERCHANTS, type SeedDestination, type SeedPriceRule, type SeedProduct } from './seed-data';
 import { COUPONS, PRODUCTS } from './seed-products';
+import { backfillCategoryExtensions } from './seed-category-extensions';
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -555,6 +556,13 @@ async function main() {
   // -------------------------------------------------------------------------
   await seedPromoBanners();
 
+  // -------------------------------------------------------------------------
+  // 10. Phase 0 category extensions + search facets.
+  //    Idempotent, so it also self-heals a database seeded before these tables
+  //    existed.
+  // -------------------------------------------------------------------------
+  await backfillCategoryData();
+
   logger.info('seed.done');
 }
 
@@ -933,6 +941,17 @@ async function backfillTicketArtifacts(): Promise<void> {
   }
 
   logger.info('seed.ticket_artifacts_backfilled', { count: orphans.length });
+}
+
+/**
+ * Phase 0: bring the category extension tables and the new search facets up to
+ * date.
+ *
+ * Idempotent and non-destructive — it upgrades an existing database in place.
+ * See `seed-category-extensions.ts` for what it can and cannot derive.
+ */
+async function backfillCategoryData(): Promise<void> {
+  await backfillCategoryExtensions(prisma);
 }
 
 main()
