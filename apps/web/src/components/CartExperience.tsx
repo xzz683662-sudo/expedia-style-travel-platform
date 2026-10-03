@@ -118,6 +118,15 @@ export function CartView({ locale }: { locale: LocaleCode }) {
               <span className="small muted">{item.optionName}</span>
               <span className="small muted">
                 {formatDate(item.serviceDate, locale)}{item.timeSlot ? ` · ${item.timeSlot}` : ''}
+                {/* A stay occupies every night in its range, so one date is
+                    ambiguous — show the span and the night count. */}
+                {item.checkOutDate && (
+                  <>
+                    {' → '}
+                    {formatDate(item.checkOutDate, locale)}
+                    {item.nights ? ` · ${item.nights} ${t('product.nights')}` : ''}
+                  </>
+                )}
               </span>
               <div className="row wrap" style={{ gap: 'var(--sp-3)' }}>
                 <div className="qty-control">

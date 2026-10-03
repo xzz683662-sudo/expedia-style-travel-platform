@@ -298,6 +298,11 @@ export type CartItem = {
   optionName: string;
   serviceDate: string;
   timeSlot: string | null;
+  /** Stay range. Present only when the line spans more than one night. */
+  checkInDate: string | null;
+  checkOutDate: string | null;
+  nights: number | null;
+  roomTypeCode: string | null;
   quantity: number;
   minPerOrder: number;
   maxPerOrder: number;
@@ -390,6 +395,12 @@ export type OrderDetail = {
     ticketTypeName: string;
     serviceDate: string;
     timeSlot: string | null;
+    /** Stay range. Null on single-date lines. */
+    checkInDate: string | null;
+    checkOutDate: string | null;
+    nights: number | null;
+    roomTypeCode: string | null;
+    nightlyPriceCents: number | null;
     quantity: number;
     lineTotalCents: number;
     destination: string | null;
@@ -785,7 +796,19 @@ export const api = {
     }),
 
   addCartItem: (
-    body: { ticketTypeId: string; serviceDate: string; timeSlot?: string | null; quantity: number },
+    body: {
+      ticketTypeId: string;
+      serviceDate: string;
+      timeSlot?: string | null;
+      /**
+       * Departure morning. Supplying it makes the line a stay: the server keeps
+       * every night in the range held and bills per night. Omit for a
+       * single-date ticket.
+       */
+      checkOutDate?: string;
+      roomTypeCode?: string;
+      quantity: number;
+    },
     token?: string | null,
     guestToken?: string | null,
     locale: LocaleCode = DEFAULT_LOCALE,

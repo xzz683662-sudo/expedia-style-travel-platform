@@ -234,7 +234,9 @@ else
   # filtering it out for "no availability" the bundle silently disappears.
   check "a package is bookable without its own inventory (${BUNDLE_SLUG})" "$([ -n "$BUNDLE_PID" ] && [ "$BUNDLE_PID" != "null" ] && echo true || echo false)"
 
-  BUNDLE_START=$(node -e "const d=new Date();d.setDate(d.getDate()+60);console.log(d.toISOString().slice(0,10));")
+  # Same reasoning as the stay window below: offset by hour-of-day so repeat
+  # runs do not compete for the same flight seat and the same room.
+  BUNDLE_START=$(node -e "const d=new Date();d.setDate(d.getDate()+$(( 60 + ( $(date +%H) % 7 ) * 3 )));console.log(d.toISOString().slice(0,10));")
   BUNDLE_CART=$(curl -fsS "$API/api/v1/cart" -H "Authorization: Bearer $TOKEN")
   BUNDLE_CART=$(curl -fsS -X POST "$API/api/v1/cart/bundle" \
     -H 'Content-Type: application/json' \
@@ -274,8 +276,13 @@ STAY_TT=$(curl -fsS "$API/api/v1/products/$STAY_SLUG" | jget '.ticketTypes.0.id'
 if [[ -z "$STAY_TT" || "$STAY_TT" == "null" ]]; then
   bad "no hotel ticket type available to test a stay"
 else
-  STAY_IN=$(node -e "const d=new Date();d.setDate(d.getDate()+40);console.log(d.toISOString().slice(0,10));")
-  STAY_OUT=$(node -e "const d=new Date();d.setDate(d.getDate()+43);console.log(d.toISOString().slice(0,10));")
+  # Offset the window by the current hour so a second run in the same day books a
+  # different range. A fixed +40 days looks safe but is not: every run really
+  # does consume that week's rooms, and after enough runs the suite fails with
+  # INVENTORY_UNAVAILABLE on a date nothing is wrong with.
+  STAY_OFFSET=$(( 40 + ( $(date +%H) % 7 ) * 3 ))
+  STAY_IN=$(node -e "const d=new Date();d.setDate(d.getDate()+$STAY_OFFSET);console.log(d.toISOString().slice(0,10));")
+  STAY_OUT=$(node -e "const d=new Date();d.setDate(d.getDate()+$STAY_OFFSET+3);console.log(d.toISOString().slice(0,10));")
 
   STAY_CART=$(curl -fsS "$API/api/v1/cart" -H "Authorization: Bearer $TOKEN")
   STAY_CART=$(curl -fsS -X POST "$API/api/v1/cart/items" \
