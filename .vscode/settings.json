@@ -1,4 +1,5 @@
 {
+    "typescript.tsdk": "node_modules/typescript/lib",
     "editor.experimental.preferTreeSitter.css": true,
     "editor.experimental.preferTreeSitter.typescript": true,
     "editor.experimental.treeSitterTelemetry": true,
