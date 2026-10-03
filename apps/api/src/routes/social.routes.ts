@@ -196,7 +196,7 @@ export async function socialRoutes(app: FastifyInstance): Promise<void> {
       return created;
     });
 
-    const { indexProduct } = await import('../modules/search/service');
+    const { indexProduct } = await import('../modules/search/service.js');
     void indexProduct(product.id);
 
     return reply.status(201).send(review);

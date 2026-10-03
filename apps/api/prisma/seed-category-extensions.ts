@@ -23,7 +23,7 @@
  * search facets are refreshed from `Product` (the display source of truth) on
  * every run.
  */
-import type { PrismaClient, Product, ProductType } from '@prisma/client';
+import type { Prisma, PrismaClient, Product, ProductType } from '@prisma/client';
 import { logger } from '../src/lib/logger';
 
 /** Product types that have a Phase 0 extension table. */
@@ -37,7 +37,7 @@ const CATEGORY_TYPES: ProductType[] = [
   'AIRPORT_TRANSFER',
 ];
 
-type Json = Record<string, unknown>;
+type Json = Prisma.InputJsonObject;
 
 /**
  * Split "SIN → JFK" (or "SIN -> JFK") into its endpoints.
