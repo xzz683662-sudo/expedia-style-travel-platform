@@ -33,7 +33,9 @@ const listSchema = z.object({
    */
   stars: z.string().trim().max(60).optional(),
   carriers: z.string().trim().max(200).optional(),
+  carrierCodes: z.string().trim().max(200).optional(),
   ships: z.string().trim().max(200).optional(),
+  destinationPorts: z.string().trim().max(200).optional(),
   boardBasis: z.string().trim().max(200).optional(),
   tags: z.string().trim().max(400).optional(),
   lat: z.coerce.number().min(-90).max(90).optional(),
@@ -110,8 +112,10 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
       // `stars` is numeric and bounded; a bad value yields undefined rather than
       // a 500 or a filter that silently matches nothing the user can see.
       starRatingIn: csvNumberList(params.stars, 1, 5),
+      carrierCodeIn: csv(params.carrierCodes),
       carrierNameIn: csv(params.carriers),
       shipNameIn: csv(params.ships),
+      destinationPortIn: csv(params.destinationPorts),
       boardBasisIn: csv(params.boardBasis),
       tags: csv(params.tags),
       latitude: params.lat,

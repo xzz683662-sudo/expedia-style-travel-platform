@@ -1325,21 +1325,6 @@ model CouponRedemption {
   @@index([orderId])
 }
 
-model Promotion {
-  id        String    @id @default(cuid())
-  slug      String    @unique
-  title     String
-  subtitle  String?
-  body      String?
-  bannerUrl String?
-  ctaLabel  String?
-  ctaUrl    String?
-  startsAt  DateTime
-  endsAt    DateTime?
-  position  Int       @default(0)
-  active    Boolean   @default(true)
-  createdAt DateTime  @default(now())
-}
 
 // ===========================================================================
 // Reviews & social proof

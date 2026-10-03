@@ -44,8 +44,10 @@ export type SearchParams = {
    * dropping the filter.
    */
   starRatingIn?: number[];
+  carrierCodeIn?: string[];
   carrierNameIn?: string[];
   shipNameIn?: string[];
+  destinationPortIn?: string[];
   boardBasisIn?: string[];
   languages?: string[];
   tags?: string[];
@@ -141,9 +143,11 @@ export type SearchHit = {
    */
   starRating: number | null;
   boardBasis: string | null;
+  carrierCode: string | null;
   carrierName: string | null;
   routeSummary: string | null;
   shipName: string | null;
+  destinationPort: string | null;
 
   /**
    * Category-specific display fields, mirrored from `Product`.
@@ -419,8 +423,10 @@ async function searchPostgres(params: SearchParams): Promise<SearchResult> {
   if (params.freeCancellationOnly) whereBase.freeCancellation = true;
   if (params.skipTheLineOnly) whereBase.skipTheLine = true;
   if (params.starRatingIn?.length) whereBase.starRating = { in: params.starRatingIn };
+  if (params.carrierCodeIn?.length) whereBase.carrierCode = { in: params.carrierCodeIn };
   if (params.carrierNameIn?.length) whereBase.carrierName = { in: params.carrierNameIn };
   if (params.shipNameIn?.length) whereBase.shipName = { in: params.shipNameIn };
+  if (params.destinationPortIn?.length) whereBase.destinationPort = { in: params.destinationPortIn };
   if (params.boardBasisIn?.length) whereBase.boardBasis = { in: params.boardBasisIn };
   if (params.tags?.length) whereBase.tags = { hasSome: params.tags.map((t) => t.toLowerCase()) };
 
@@ -480,9 +486,11 @@ async function searchPostgres(params: SearchParams): Promise<SearchResult> {
         tags: doc.tags,
         starRating: doc.starRating ?? null,
         boardBasis: doc.boardBasis ?? null,
+        carrierCode: doc.carrierCode ?? null,
         carrierName: doc.carrierName ?? null,
         routeSummary: doc.routeSummary ?? null,
         shipName: doc.shipName ?? null,
+        destinationPort: doc.destinationPort ?? null,
       };
     });
 
@@ -767,8 +775,10 @@ async function searchOpenSearch(params: SearchParams): Promise<SearchResult> {
   if (params.freeCancellationOnly) facetFilter.push({ term: { freeCancellation: true } });
   if (params.skipTheLineOnly) facetFilter.push({ term: { skipTheLine: true } });
   if (params.starRatingIn?.length) facetFilter.push({ terms: { starRating: params.starRatingIn } });
+  if (params.carrierCodeIn?.length) facetFilter.push({ terms: { carrierCode: params.carrierCodeIn } });
   if (params.carrierNameIn?.length) facetFilter.push({ terms: { carrierName: params.carrierNameIn } });
   if (params.shipNameIn?.length) facetFilter.push({ terms: { shipName: params.shipNameIn } });
+  if (params.destinationPortIn?.length) facetFilter.push({ terms: { destinationPort: params.destinationPortIn } });
   if (params.boardBasisIn?.length) facetFilter.push({ terms: { boardBasis: params.boardBasisIn } });
   if (params.minPriceCents !== undefined) facetFilter.push({ range: { basePriceCents: { gte: params.minPriceCents } } });
   if (params.maxPriceCents !== undefined) facetFilter.push({ range: { basePriceCents: { lte: params.maxPriceCents } } });
@@ -895,9 +905,11 @@ async function searchOpenSearch(params: SearchParams): Promise<SearchResult> {
           tags: (h.tags as string[]) ?? [],
           starRating: (h.starRating as number) ?? null,
           boardBasis: (h.boardBasis as string) ?? null,
+          carrierCode: (h.carrierCode as string) ?? null,
           carrierName: (h.carrierName as string) ?? null,
           routeSummary: (h.routeSummary as string) ?? null,
           shipName: (h.shipName as string) ?? null,
+          destinationPort: (h.destinationPort as string) ?? null,
         };
       });
 

@@ -121,6 +121,7 @@ pnpm db:seed                 # catalogue, inventory, demo orders, staff accounts
 pnpm dev:api                 # Fastify on :4000
 pnpm dev:web                 # Next.js on :3000
 pnpm smoke                   # end-to-end API test suite
+pnpm audit:schema            # find columns written but never read
 pnpm typecheck               # both packages
 ```
 
@@ -405,15 +406,25 @@ Operations: `GET /health`, `GET /ready` (per-dependency readiness).
 ## Testing
 
 ```bash
-bash scripts/smoke-test.sh    # 80 checks, requires both services running
+bash scripts/smoke-test.sh    # 84 checks, requires both services running
 bash scripts/mobile-check.sh  # 40 checks, responsive layer regression guard
+bash scripts/schema-audit.sh  # finds columns a seed writes but no route reads
 pnpm typecheck                # strict TS across api + web
 pnpm --filter @easytrip/web build
-pnpm verify                   # typecheck + smoke + realtime + mobile, one command
+pnpm verify                   # typecheck + schema audit + smoke + realtime + mobile
 ```
 
 The smoke suite is end-to-end against a live stack — it books a real order, pays it,
 redeems the ticket at the gate, and asserts the second scan is rejected.
+
+`schema-audit.sh` mechanises a failure mode this codebase kept hitting: a seed
+or backfill writes a column, and no route ever reads it, so it reads like a
+feature that exists. It parses `schema.prisma`, then checks every scalar column
+against the seeds that write it and the code under `apps/api/src` that reads it.
+Foreign keys are excluded (Prisma often puts `@relation` on the following line),
+as are relation fields and array filters. The run fails if it managed to inspect
+implausibly few columns — a previous version silently checked zero and reported
+success, which is the exact bug it exists to catch.
 
 `mobile-check.sh` reads the **built** CSS at `apps/web/.next/static/css/*.css`, so run
 `pnpm --filter @easytrip/web build` first. `next dev` deletes that directory, which is why

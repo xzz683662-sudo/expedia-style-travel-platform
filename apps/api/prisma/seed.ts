@@ -478,44 +478,6 @@ async function main() {
     });
   }
 
-  await prisma.promotion.deleteMany({});
-  await prisma.promotion.createMany({
-    data: [
-      {
-        slug: 'summer-city-breaks',
-        title: 'City breaks from $19',
-        subtitle: 'Museums, tours and cruises across Europe and the US',
-        body: 'Book a museum pass, a guided tour or a sunset cruise and save on the usual city break prices.',
-        ctaLabel: 'Browse city breaks',
-        ctaUrl: '/search?sort=PRICE_ASC',
-        startsAt: new Date(Date.now() - 86_400_000),
-        endsAt: addDays(new Date(), 90),
-        position: 1,
-      },
-      {
-        slug: 'family-adventure',
-        title: 'Family days out made easy',
-        subtitle: 'Kids go free deals and family bundles',
-        body: 'Family bundles that bundle the tickets, the guides and the queue-skipping into one price.',
-        ctaLabel: 'See family offers',
-        ctaUrl: '/search?tags=family',
-        startsAt: new Date(Date.now() - 86_400_000),
-        endsAt: addDays(new Date(), 120),
-        position: 2,
-      },
-      {
-        slug: 'free-cancellation',
-        title: 'Plans change. Free cancellation on thousands of experiences.',
-        subtitle: 'Cancel up to 24 hours before for a full refund',
-        ctaLabel: 'Browse flexible options',
-        ctaUrl: '/search?freeCancellation=true',
-        startsAt: new Date(Date.now() - 86_400_000),
-        endsAt: addDays(new Date(), 180),
-        position: 3,
-      },
-    ],
-  });
-
   // -------------------------------------------------------------------------
   // 5. Add-ons
   // -------------------------------------------------------------------------

@@ -115,6 +115,23 @@ STARS_ALL=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1")
 STARS_ALL_COUNT=$(echo "$STARS_ALL" | jget '.total')
 check "starRating facet narrows results (${STARS_5_COUNT:-0} of ${STARS_ALL_COUNT:-0})" "$([ "${STARS_5_COUNT:-0}" -gt 0 ] 2>/dev/null && [ "${STARS_5_COUNT:-0}" -lt "${STARS_ALL_COUNT:-0}" ] 2>/dev/null && echo true || echo false)"
 
+# carrierCode is stored from an explicit IATA table, not guessed from the carrier
+# name, so a flight must actually carry one. A facet column that is always null
+# indexes nothing and filters nothing while still reading as a feature.
+FLIGHT_TOTAL=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=1" | jget '.total')
+CARRIER_BA=$(curl -fsS "$API/api/v1/search?type=FLIGHT&carrierCodes=BA&limit=1")
+CARRIER_BA_COUNT=$(echo "$CARRIER_BA" | jget '.total')
+CARRIER_BA_FIELD=$(echo "$CARRIER_BA" | jget '.items.0.carrierCode')
+check "flight hit carries a real IATA carrier code (${CARRIER_BA_FIELD:-none})" "$([ -n "$CARRIER_BA_FIELD" ] && [ "$CARRIER_BA_FIELD" != "null" ] && echo true || echo false)"
+check "carrierCode facet narrows flights (${CARRIER_BA_COUNT:-0} of ${FLIGHT_TOTAL:-0})" "$([ "${CARRIER_BA_COUNT:-0}" -gt 0 ] 2>/dev/null && [ "${CARRIER_BA_COUNT:-0}" -lt "${FLIGHT_TOTAL:-0}" ] 2>/dev/null && echo true || echo false)"
+
+CARRIER_NONE=$(curl -fsS "$API/api/v1/search?type=FLIGHT&carrierCodes=ZZ&limit=1" | jget '.total')
+check "an unknown carrier code returns nothing (${CARRIER_NONE:-null})" "$([ "${CARRIER_NONE:-null}" = "0" ] && echo true || echo false)"
+
+PORT_HITS=$(curl -fsS "$API/api/v1/search?type=CRUISE&destinationPorts=London&limit=1")
+PORT_COUNT=$(echo "$PORT_HITS" | jget '.total')
+check "cruise embarkation port facet filters (${PORT_COUNT:-0} hit(s))" "$([ "${PORT_COUNT:-0}" -gt 0 ] 2>/dev/null && echo true || echo false)"
+
 # Out-of-range and junk values are dropped, not rejected: the storefront should
 # never 422 because one chip carried a bad value.
 BAD_STARS_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/search?type=HOTEL_ROOM&stars=99")

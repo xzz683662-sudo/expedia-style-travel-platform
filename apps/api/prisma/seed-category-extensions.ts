@@ -58,16 +58,51 @@ export function parseRoute(route: string | null | undefined): { from: string; to
 }
 
 /**
- * IATA carrier code from a carrier name.
+ * IATA two-letter code per carrier name.
  *
- * Only recognises a name that *is* a 2-letter code. "British Airways" → "BA"
- * is a lookup against a carrier table, not a transform, and guessing it would
- * produce confidently wrong PNRs — so it stays null here.
+ * These are looked up, not derived. "British Airways" → "BA" is a fact about
+ * that carrier, and the first draft of this file tried to avoid the lookup by
+ * refusing to map anything, which left `SearchDocument.carrierCode` null for
+ * every row and the `@@index([type, carrierCode])` behind it serving nothing.
+ * Guessing would have been worse — a wrong code produces a confidently wrong
+ * PNR — so the mapping is spelled out and reviewable instead.
+ *
+ * Covers every name in `FLIGHT_CARRIERS` (seed-global.ts).
+ */
+const CARRIER_CODES: Record<string, string> = {
+  'Air Canada': 'AC',
+  'Air Europa': 'UX',
+  'Air France': 'AF',
+  'ANA': 'NH',
+  'Austrian Airlines': 'OS',
+  'British Airways': 'BA',
+  'Cathay Pacific': 'CX',
+  'Delta Air Lines': 'DL',
+  'Emirates': 'EK',
+  'Iberia': 'IB',
+  'ITA Airways': 'AZ',
+  'Japan Airlines': 'JL',
+  'JetBlue': 'B6',
+  'KLM': 'KL',
+  'Lufthansa': 'LH',
+  'Qantas': 'QF',
+  'Singapore Airlines': 'SQ',
+  'SWISS': 'LX',
+  'TAP Air Portugal': 'TP',
+  'Turkish Airlines': 'TK',
+  'United Airlines': 'UA',
+  'Virgin Atlantic': 'VS',
+};
+
+/**
+ * IATA carrier code for a carrier name, or null when the name is not one this
+ * table knows. A literal two-letter code passes through unchanged.
  */
 function carrierCodeFromName(name: string | null | undefined): string | null {
   if (!name) return null;
   const explicit = /^\s*([A-Z0-9]{2})\s*$/.exec(name);
-  return explicit ? explicit[1] : null;
+  if (explicit) return explicit[1];
+  return CARRIER_CODES[name] ?? null;
 }
 
 /** Stable uppercase code from free text: "Deluxe King" → "DELUXE_KING". */
