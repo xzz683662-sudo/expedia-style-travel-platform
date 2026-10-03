@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { CartStatus, type Prisma } from '@prisma/client';
+import { CartStatus, ProductType, type Prisma } from '@prisma/client';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { createPendingOrder } from '../modules/booking/engine';
+import { expandBundle } from '../modules/booking/bundle';
 import { computeQuote } from '../modules/pricing/engine';
 import { assertStayLengthAllowed, stayNights } from '../modules/inventory/engine';
 import { resolveLocale } from '../plugins/auth';
@@ -223,6 +224,130 @@ export async function cartRoutes(app: FastifyInstance): Promise<void> {
     const cart = await resolveCart(request, true);
     const payload = await cartPayload(cart.id, resolveLocale(request));
     return { ...payload, guestToken: 'newGuestToken' in cart ? cart.newGuestToken : undefined };
+  });
+
+  /**
+   * Adds a package to the cart as its component lines.
+   *
+   * A bundle is not a separate order type — it is expanded into ordinary cart
+   * lines here, and everything downstream (pricing, holds, payment, refunds)
+   * already handles multi-line carts correctly. That is why the checkout engine
+   * needed no bundle awareness at all: by the time an order exists, the bundle
+   * is already N independent lines that the existing rollback holds together.
+   *
+   * Each component needs its own availability check, because a package whose
+   * flight is sold out must not sit in the cart as a silently broken promise.
+   */
+  app.post('/cart/bundle', async (request) => {
+    const cart = await resolveCart(request);
+    const body = z
+      .object({
+        productId: z.string().min(1),
+        serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        quantity: z.number().int().min(1).max(20),
+      })
+      .parse(request.body);
+
+    const bundle = await prisma.productBundle.findUnique({
+      where: { productId: body.productId },
+      include: { product: true, components: { orderBy: { position: 'asc' } } },
+    });
+    if (!bundle || bundle.product.type !== ProductType.PACKAGE) {
+      throw AppError.notFound('No such package');
+    }
+
+    const startDate = toServiceDate(body.serviceDate);
+    if (startDate.getTime() < toServiceDate(new Date()).getTime()) {
+      throw AppError.validation('Service date cannot be in the past');
+    }
+
+    const ticketTypes = await prisma.ticketType.findMany({
+      where: { id: { in: bundle.components.map((c) => c.ticketTypeId) }, active: true },
+    });
+    const byId = new Map(ticketTypes.map((t) => [t.id, t]));
+
+    const expanded = expandBundle(
+      bundle.components.map((c) => ({
+        ticketTypeId: c.ticketTypeId,
+        kind: c.kind,
+        label: c.label,
+        position: c.position,
+        required: c.required,
+        quantity: c.quantity,
+        stayNights: c.stayNights,
+        startOffsetDays: c.startOffsetDays,
+      })),
+      {
+        bundleProductId: bundle.productId,
+        startDate,
+        quantity: body.quantity,
+        availableTicketTypeIds: new Set(ticketTypes.map((t) => t.id)),
+      },
+    );
+
+    await prisma.$transaction(async (tx) => {
+      const openCart = await lockOpenCart(tx, cart.id);
+      const itemCount = await tx.cartItem.count({ where: { cartId: cart.id } });
+
+      if (itemCount === 0) {
+        // An empty cart adopts the currency of whatever is first added to it —
+        // its own `currency` column is only a `USD` default until then. This has
+        // to happen *before* any validation below, otherwise a first add of a
+        // non-USD bundle compares every component against a placeholder USD and
+        // rejects a cart that is, in fact, empty and consistent.
+        const first = byId.get(expanded.lines[0]?.ticketTypeId ?? '');
+        if (first) {
+          await tx.cart.update({ where: { id: cart.id }, data: { currency: first.currency } });
+        }
+      } else if (expanded.lines.some((line) => byId.get(line.ticketTypeId)?.currency !== openCart.currency)) {
+        // Validate the whole expansion at once. Checking component by component
+        // would let a two-part bundle straddle two carts' worth of state and
+        // leave the first component written when the second is rejected.
+        throw AppError.validation('A cart can contain products in one currency only');
+      }
+
+      for (const line of expanded.lines) {
+        const tt = byId.get(line.ticketTypeId)!;
+        if (body.quantity < tt.minPerOrder * line.quantity || body.quantity > tt.maxPerOrder * line.quantity) {
+          throw AppError.validation(
+            `Quantity for ${line.label} must be between ${tt.minPerOrder * line.quantity} and ${tt.maxPerOrder * line.quantity}`,
+          );
+        }
+        await tx.cartItem.create({
+          data: {
+            cartId: cart.id,
+            productId: tt.productId,
+            ticketTypeId: tt.id,
+            serviceDate: line.serviceDate,
+            timeSlot: null,
+            checkInDate: line.checkOutDate ? line.serviceDate : null,
+            checkOutDate: line.checkOutDate,
+            nights: line.checkOutDate ? line.nights : null,
+            roomTypeCode: null,
+            quantity: line.quantity,
+            unitPriceCents: quoteUnitPrice(
+              await tx.ticketType.findUniqueOrThrow({
+                where: { id: tt.id },
+                include: { product: { include: { priceRules: true } }, priceRules: true },
+              }),
+              line.serviceDate,
+              line.quantity,
+              '',
+              line.nights,
+            ),
+            locale: resolveLocale(request),
+          },
+        });
+      }
+    });
+
+    const payload = await cartPayload(cart.id, resolveLocale(request));
+    return {
+      ...payload,
+      bundleProductId: bundle.productId,
+      componentCount: expanded.lines.length,
+      droppedOptional: expanded.droppedOptional,
+    };
   });
 
   app.post('/cart/items', async (request, reply) => {

@@ -199,6 +199,14 @@ async function resolveAvailabilityAndPrice(
   const result = new Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>();
   if (productIds.length === 0) return result;
 
+  // Bundles carry no inventory of their own, so they must bypass the
+  // availability gate below and be resolved from their components instead.
+  const bundleRows = await prisma.productBundle.findMany({
+    where: { productId: { in: productIds } },
+    select: { productId: true },
+  });
+  const bundleProductIds = new Set(bundleRows.map((b) => b.productId));
+
   const ticketTypes = await prisma.ticketType.findMany({
     where: { productId: { in: productIds }, active: true },
     select: {
@@ -222,7 +230,11 @@ async function resolveAvailabilityAndPrice(
 
     // With explicit dates we require availability on *at least one* of them;
     // this keeps multi-date browsing useful while never showing dead ends.
-    if (available <= 0) continue;
+    // A bundle is exempt: it never holds stock itself, and its availability is
+    // resolved from its components in `addBundleAvailability`. Gating it here
+    // would drop every package from search.
+    const isBundle = bundleProductIds.has(ticketType.productId);
+    if (available <= 0 && !isBundle) continue;
 
     const existing = result.get(ticketType.productId);
     if (!existing || ticketType.basePriceCents < existing.minPriceCents) {
@@ -235,7 +247,80 @@ async function resolveAvailabilityAndPrice(
     }
   }
 
+  await addBundleAvailability(result, bundleProductIds, dates, requestedDates);
+
   return result;
+}
+
+/**
+ * Folds component availability up into each bundle.
+ *
+ * A bundle holds no inventory of its own — its `TicketType` exists only as a
+ * booking entry point, and what is actually sold is its components. Left
+ * unhandled, every package is dropped by the "no availability" rule above and
+ * silently disappears from search, which is how a seeded package can exist in
+ * the database and return zero results.
+ *
+ * A package is bookable when every **required** component has stock. Optional
+ * components are skipped on expansion if they are sold out, so letting one gate
+ * the package would hide trips that are still perfectly bookable.
+ */
+async function addBundleAvailability(
+  result: Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>,
+  bundleProductIds: Set<string>,
+  dates: Date[],
+  requestedDates?: string[],
+): Promise<void> {
+  if (bundleProductIds.size === 0) return;
+
+  const bundles = await prisma.productBundle.findMany({
+    where: { productId: { in: [...bundleProductIds] } },
+    include: { components: true },
+  });
+  if (bundles.length === 0) return;
+
+  const componentIds = bundles.flatMap((b) => b.components.map((c) => c.ticketTypeId));
+  if (componentIds.length === 0) return;
+
+  const componentTypes = await prisma.ticketType.findMany({
+    where: { id: { in: componentIds }, active: true },
+    select: {
+      id: true,
+      inventoryMode: true,
+      inventory: dates.length
+        ? { where: { serviceDate: { in: dates } }, select: { capacityTotal: true, capacityHeld: true, capacitySold: true, status: true } }
+        : { where: { serviceDate: { gte: new Date() } }, select: { capacityTotal: true, capacityHeld: true, capacitySold: true, status: true }, take: 40 },
+    },
+  });
+
+  for (const bundle of bundles) {
+    const own = result.get(bundle.productId);
+    if (!own) continue;
+
+    const unitsFor = (ticketTypeId: string): number => {
+      const type = componentTypes.find((t) => t.id === ticketTypeId);
+      if (!type) return 0;
+      return type.inventory.reduce((total, record) => {
+        if (record.status === 'CLOSED' || record.status === 'SOLD_OUT') return total;
+        if (type.inventoryMode === 'UNLIMITED') return total + 1_000;
+        return total + Math.max(0, record.capacityTotal - record.capacityHeld - record.capacitySold);
+      }, 0);
+    };
+
+    // Required components gate the package; optional ones only widen it.
+    const required = bundle.components.filter((c) => c.required);
+    const gating = required.length > 0 ? required : bundle.components;
+    const leastAvailable = gating.map((c) => unitsFor(c.ticketTypeId)).sort((a, b) => a - b)[0] ?? 0;
+    if (leastAvailable <= 0) continue;
+
+    result.set(bundle.productId, {
+      ...own,
+      // A trip of several bookings can be sold to fewer travellers than any one
+      // component allows on its own.
+      availableQty: Math.min(leastAvailable, own.availableQty || leastAvailable),
+      nextDate: own.nextDate ?? requestedDates?.[0] ?? null,
+    });
+  }
 }
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {

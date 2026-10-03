@@ -41,6 +41,7 @@ import { refreshAvailabilityCalendar } from '../src/modules/search/service';
 import { DESTINATIONS, MERCHANTS, type SeedDestination, type SeedPriceRule, type SeedProduct } from './seed-data';
 import { COUPONS, PRODUCTS } from './seed-products';
 import { backfillCategoryExtensions } from './seed-category-extensions';
+import { seedBundles } from './seed-bundles';
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -952,6 +953,7 @@ async function backfillTicketArtifacts(): Promise<void> {
  */
 async function backfillCategoryData(): Promise<void> {
   await backfillCategoryExtensions(prisma);
+  await seedBundles(prisma);
 }
 
 main()

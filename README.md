@@ -224,6 +224,15 @@ signatures they always had. Holds are **all-or-nothing**: if any night is unavai
 group is discarded and no night stays blocked. `ProductStay.policies` carries `minNights` /
 `maxNights`, enforced before a hold is placed.
 
+**Packages are not booked — they are expanded.** A `ProductBundle` lists component
+`TicketType`s with an optional `startOffsetDays`, so "flight + 3 nights" is one purchasable
+thing. Adding one to a cart writes its components as separate lines (the flight as a
+single-date line, the hotel as a 3-night stay) and the package itself never becomes a line —
+otherwise checkout would bill for the bundle *and* its parts. Checkout then holds and prices
+them as one order, so a package is all-or-nothing across categories. The headline price is
+derived from live component prices at read time rather than stored, so it cannot drift when a
+component reprices.
+
 **One shape for the spine, category tables for the depth.** `Product → TicketType → OrderItem`
 stays the single transactional path. On top of it, `ProductStay`, `ProductFlight`,
 `ProductSailing` and `ProductVehicle` carry the structure a flat column cannot express — a
@@ -389,7 +398,7 @@ Operations: `GET /health`, `GET /ready` (per-dependency readiness).
 ## Testing
 
 ```bash
-bash scripts/smoke-test.sh    # 67 checks, requires both services running
+bash scripts/smoke-test.sh    # 73 checks, requires both services running
 bash scripts/mobile-check.sh  # 40 checks, responsive layer regression guard
 pnpm typecheck                # strict TS across api + web
 pnpm --filter @easytrip/web build

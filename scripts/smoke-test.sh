@@ -219,6 +219,50 @@ curl -fsS -X DELETE "$API/api/v1/wishlist/$PRODUCT_ID" -H "Authorization: Bearer
 WISHLIST=$(curl -fsS "$API/api/v1/wishlist" -H "Authorization: Bearer $TOKEN")
 check "customer can remove a saved product" "$(echo "$WISHLIST" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(!JSON.parse(d).some(i=>i.productId==='$PRODUCT_ID'))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
 
+head2 "Package bundle"
+# A bundle is not a product with its own stock — it expands into its components.
+# These assert the two properties that make it a bundle rather than a discount
+# label: it becomes multiple order lines, and those lines span both the
+# single-date and the multi-night hold shapes in one booking.
+BUNDLE_SLUG=$(curl -fsS "$API/api/v1/search?type=PACKAGE&limit=1" | jget '.items.0.slug')
+if [[ -z "$BUNDLE_SLUG" || "$BUNDLE_SLUG" == "null" ]]; then
+  bad "no package available to test bundle expansion"
+else
+  BUNDLE_DETAIL=$(curl -fsS "$API/api/v1/products/$BUNDLE_SLUG")
+  BUNDLE_PID=$(echo "$BUNDLE_DETAIL" | jget '.id')
+  # A bundle carries no inventory rows of its own; if search ever starts
+  # filtering it out for "no availability" the bundle silently disappears.
+  check "a package is bookable without its own inventory (${BUNDLE_SLUG})" "$([ -n "$BUNDLE_PID" ] && [ "$BUNDLE_PID" != "null" ] && echo true || echo false)"
+
+  BUNDLE_START=$(node -e "const d=new Date();d.setDate(d.getDate()+60);console.log(d.toISOString().slice(0,10));")
+  BUNDLE_CART=$(curl -fsS "$API/api/v1/cart" -H "Authorization: Bearer $TOKEN")
+  BUNDLE_CART=$(curl -fsS -X POST "$API/api/v1/cart/bundle" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"productId\":\"$BUNDLE_PID\",\"serviceDate\":\"$BUNDLE_START\",\"quantity\":1}")
+  BUNDLE_ITEM_COUNT=$(echo "$BUNDLE_CART" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).items.length)}catch{console.log(0)}});")
+  check "a bundle expands into several cart lines (${BUNDLE_ITEM_COUNT:-0})" "$([ "${BUNDLE_ITEM_COUNT:-0}" -ge 2 ] 2>/dev/null && echo true || echo false)"
+
+  # A flight line stays on one date; the stay line carries its own night count.
+  # Getting this wrong books three nights as three separate rooms.
+  BUNDLE_HAS_NIGHT=$(echo "$BUNDLE_CART" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).items.some(i=>(i.nights||1)>1))}catch{console.log(false)}});")
+  check "the expanded bundle mixes single-date and multi-night lines" "$([ "$BUNDLE_HAS_NIGHT" = "true" ] && echo true || echo false)"
+
+  BUNDLE_CHECKOUT=$(curl -fsS -X POST "$API/api/v1/cart/checkout" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"contactEmail":"traveler@easytrip.test","travelers":[{"fullName":"Smoke Bundle","dateOfBirth":"1990-01-01"}]}')
+  BUNDLE_ORDER=$(echo "$BUNDLE_CHECKOUT" | jget '.orderId')
+  check "a bundle checks out as one order (${BUNDLE_ORDER:-none})" "$([ -n "$BUNDLE_ORDER" ] && [ "$BUNDLE_ORDER" != "null" ] && echo true || echo false)"
+  check "the bundle order returns its component lines" "$([ -n "$BUNDLE_ORDER" ] && [ "$BUNDLE_ORDER" != "null" ] && curl -fsS "$API/api/v1/orders/$BUNDLE_ORDER" -H "Authorization: Bearer $TOKEN" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);console.log(o.items.length>=2&&new Set(o.items.map(i=>i.productType)).size>=2)}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
+
+  # The order total must be the sum of what the customer was shown, per line.
+  # A package that inflates its own total on the way through checkout bills for
+  # components *and* the bundle.
+  BUNDLE_TOTAL_OK=$(curl -fsS "$API/api/v1/orders/$BUNDLE_ORDER" -H "Authorization: Bearer $TOKEN" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);const sum=o.items.reduce((a,i)=>a+i.lineTotalCents,0);console.log(sum>0&&(o.totals?.totalCents===sum||o.totalCents===sum))}catch{console.log(false)}});")
+  check "the order total equals the sum of its component lines" "$([ "$BUNDLE_TOTAL_OK" = "true" ] && echo true || echo false)"
+fi
+
 head2 "Multi-night stay"
 # A hotel stay is sold per room per night. These assert the three properties
 # that distinguish it from a ticket: nights are billed, every night in the range

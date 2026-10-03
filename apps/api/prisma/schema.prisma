@@ -297,6 +297,9 @@ model Product {
 
   ticketTypes    TicketType[]
   cartItems      CartItem[]
+  // Set only when `type` is PACKAGE. Null for every other category, so a
+  // non-bundle product can never accidentally be expanded into lines.
+  bundle        ProductBundle?
   holdGroups     InventoryHoldGroup[]
   media          ProductMedia[]
   priceRules     PriceRule[]
@@ -411,6 +414,10 @@ model TicketType {
   name         String
   description  String?
   translations TicketTypeTranslation[]
+  // Ticket types that appear as a component of some bundle. A ticket type can
+  // be sold on its own *and* inside a bundle — the bundle references it, it
+  // does not take ownership, so `onDelete` is deliberately not Cascade.
+  bundleComponents BundleComponent[]
 
   // Money
   basePriceCents   Int
@@ -1937,4 +1944,104 @@ model ProductVehicle {
   updatedAt DateTime @updatedAt
 
   @@index([serviceKind])
+}
+
+// ===========================================================================
+// Bundles — a flight and a room sold as one indivisible thing
+// ===========================================================================
+
+/// A pre-composed itinerary sold as a single product: "flight + 3 nights in
+/// Rome + airport transfer". The bundle is the Product (type `PACKAGE`) the
+/// customer browses and adds to the cart; the components below are what it
+/// actually books.
+///
+/// Why the bundle is atomic
+/// -----------------------
+/// Selling a flight without the hotel it was priced against is worse than
+/// selling neither: the customer has a flight to a city with no room and a
+/// bundle discount they cannot use. So a bundle resolves to N component lines
+/// and they are held, sold and released together — the booking engine already
+/// rolls back every hold it took when any line in the order fails, which is
+/// exactly the guarantee needed here. `expandBundle` is the single place that
+/// turns a bundle into lines, so the guarantee lives in one function rather
+/// than being spread across every call site.
+///
+/// Components point at a `TicketType`, not a `Product`, because that is the
+/// unit the booking engine already prices and holds. A hotel component naming
+/// the room tier, a flight component naming the cabin, is the same row the
+/// customer would have booked separately.
+model ProductBundle {
+  productId String  @id
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  /// Human-readable summary shown before expanding, e.g. "Return flight +
+  /// 3 nights central Rome + private airport transfer".
+  summary String?
+
+  /// { flight: true, stay: true, groundTransport: true, notes: "..." } — which
+  /// component kinds the customer can expect. Descriptive only; `components` is
+  /// the authority on what is actually included.
+  includes Json @default("{}")
+
+  /// Bundle-level conditions that apply to the whole trip rather than to one
+  /// component: { minNights, maxNights, cancellationDeadlineHours,
+  ///   priceGuaranteedUntil, notes }
+  policies Json @default("{}")
+
+  /// What the bundle saves against booking the components separately. Computed
+  /// from live component prices at read time rather than stored, so it cannot
+  /// drift out of date when a component repriced.
+  displayDiscountLabel String?
+
+  updatedAt DateTime @updatedAt
+
+  components BundleComponent[]
+}
+
+/// One sellable line inside a bundle.
+///
+/// `quantity` is rooms/tickets within the component. `required` marks a
+/// component the bundle cannot be sold without: a flight is required, an
+/// optional add-on (a museum pass, a lounge key) is not. Expands into
+/// `required` lines always, optional ones only when requested.
+model BundleComponent {
+  id        String        @id @default(cuid())
+  bundleId  String
+  bundle    ProductBundle @relation(fields: [bundleId], references: [productId], onDelete: Cascade)
+
+  /// The component kind, for display and for grouping lines on the order.
+  /// FLIGHT | STAY | GROUND_TRANSPORT | ADDON | ACTIVITY
+  kind String
+
+  /// The unit the booking engine prices and holds.
+  ticketTypeId String
+  ticketType   TicketType @relation(fields: [ticketTypeId], references: [id])
+
+  /// Headline for the bundle card, e.g. "Return flight SIN–FCO".
+  label String
+
+  /// Free-text ordering hint. Position is presentation, not identity, so two
+  /// components of the same kind keep a stable order without a sequence column.
+  position Int @default(0)
+
+  /// Optional components are offered but not booked unless asked for.
+  required Boolean @default(true)
+
+  /// Rooms/tickets for this component. A 3-night hotel component still books one
+  /// room; the stay range lives on the expanded line, not here.
+  quantity Int @default(1)
+
+  /// Which piece of a multi-night stay this component is. `null` for anything
+  /// that is not a stay. A stay component sets `stayNights`, and expansion
+  /// produces a range long enough to cover it.
+  stayNights Int?
+
+  /// Offset from the bundle's start date, in days. Lets a component start on a
+  /// different day from the bundle — a flight lands day 0, the stay begins day 1
+  /// because arrival is that evening. Null means "starts with the bundle".
+  startOffsetDays Int?
+
+  @@unique([bundleId, ticketTypeId, position])
+  @@index([bundleId])
+  @@index([ticketTypeId])
 }
