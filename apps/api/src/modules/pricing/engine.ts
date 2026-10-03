@@ -75,6 +75,24 @@ export type Quote = {
 type Conditions = Record<string, unknown>;
 type Adjustment = Record<string, unknown>;
 
+/**
+ * Reads a numeric bound from a rule's `conditions`, collapsing "absent" to null.
+ *
+ * `conditions` is a Json column, and both the seeders and the Phase 0 backfill
+ * store an explicit `null` for a bound they could not supply rather than leaving
+ * the key out. A `conditions.maxNights as number | undefined` therefore looks
+ * correct and is not: the cast is erased at runtime, the JSON `null` arrives
+ * unchanged, and `null !== undefined` passes, so "no maximum" reads as a maximum
+ * of `null` — which formats as 0 and rejects every stay.
+ *
+ * Checking the type instead of comparing to `undefined` is the only reliable
+ * way to tell "the rule sets a bound" from "the rule sets no bound".
+ */
+function numericBound(conditions: Conditions, key: string): number | null {
+  const value = conditions[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
 function matchesWindow(rule: PriceRuleInput, now: Date): boolean {
   if (!rule.active) return false;
   if (rule.startsAt && rule.startsAt.getTime() > now.getTime()) return false;
@@ -138,12 +156,12 @@ function evaluate(
 
     case PriceRuleKind.LEAD_TIME: {
       const leadDays = differenceInDays(context.serviceDate, now);
-      const min = conditions.minLeadDays as number | undefined;
-      const max = conditions.maxLeadDays as number | undefined;
-      if (min !== undefined && leadDays < min) {
+      const min = numericBound(conditions, 'minLeadDays');
+      const max = numericBound(conditions, 'maxLeadDays');
+      if (min !== null && leadDays < min) {
         return { matched: false, deltaCents: 0, note: 'inside lead-time window' };
       }
-      if (max !== undefined && leadDays > max) {
+      if (max !== null && leadDays > max) {
         return { matched: false, deltaCents: 0, note: 'outside lead-time window' };
       }
       return applyAdjustment(adjustment, runningTotalCents, `lead time ${leadDays}d`);
@@ -151,12 +169,12 @@ function evaluate(
 
     case PriceRuleKind.LENGTH_OF_STAY: {
       const nights = context.nights ?? 1;
-      const min = conditions.minNights as number | undefined;
-      const max = conditions.maxNights as number | undefined;
-      if (min !== undefined && nights < min) {
+      const min = numericBound(conditions, 'minNights');
+      const max = numericBound(conditions, 'maxNights');
+      if (min !== null && nights < min) {
         return { matched: false, deltaCents: 0, note: 'stay too short' };
       }
-      if (max !== undefined && nights > max) {
+      if (max !== null && nights > max) {
         return { matched: false, deltaCents: 0, note: 'stay too long' };
       }
       return applyAdjustment(adjustment, runningTotalCents, `${nights} night stay`);
@@ -164,20 +182,20 @@ function evaluate(
 
     case PriceRuleKind.OCCUPANCY: {
       const occupancy = context.occupancy ?? 0;
-      const min = conditions.minOccupancy as number | undefined;
-      const max = conditions.maxOccupancy as number | undefined;
-      if (min !== undefined && occupancy < min) {
+      const min = numericBound(conditions, 'minOccupancy');
+      const max = numericBound(conditions, 'maxOccupancy');
+      if (min !== null && occupancy < min) {
         return { matched: false, deltaCents: 0, note: 'occupancy below threshold' };
       }
-      if (max !== undefined && occupancy > max) {
+      if (max !== null && occupancy > max) {
         return { matched: false, deltaCents: 0, note: 'occupancy above threshold' };
       }
       return applyAdjustment(adjustment, runningTotalCents, `occupancy ${(occupancy * 100).toFixed(0)}%`);
     }
 
     case PriceRuleKind.QUANTITY_BREAK: {
-      const min = conditions.minQty as number | undefined;
-      if (min !== undefined && context.quantity < min) {
+      const min = numericBound(conditions, 'minQty');
+      if (min !== null && context.quantity < min) {
         return { matched: false, deltaCents: 0, note: 'quantity break not reached' };
       }
       return applyAdjustment(adjustment, runningTotalCents, `quantity ${context.quantity}`);

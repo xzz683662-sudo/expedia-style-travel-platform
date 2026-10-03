@@ -215,6 +215,15 @@ consumes it, and abandonment or a background sweep releases it. A sweeper runs e
 transfers are all `Product → TicketType`. The booking engine has exactly one code path,
 which is why adding a category doesn't mean adding a subsystem.
 
+**Hotel stays are priced and held per night, not per booking.** Supplying `checkOutDate` on
+a cart item turns it into a stay: nights = `checkOut − checkIn`, the line total becomes
+`rate × rooms × nights`, and every night in the range is held. A 3-night booking is one
+`InventoryHoldGroup` owning three `InventoryHold` rows — one per night — so checkout,
+payment and expiry each act on the whole set while `releaseHold`/`consumeHold` keep the
+signatures they always had. Holds are **all-or-nothing**: if any night is unavailable the
+group is discarded and no night stays blocked. `ProductStay.policies` carries `minNights` /
+`maxNights`, enforced before a hold is placed.
+
 **One shape for the spine, category tables for the depth.** `Product → TicketType → OrderItem`
 stays the single transactional path. On top of it, `ProductStay`, `ProductFlight`,
 `ProductSailing` and `ProductVehicle` carry the structure a flat column cannot express — a
@@ -347,7 +356,9 @@ outside the valid range are dropped rather than rejected, so a bad chip value de
 **Orders** — `POST /orders`, `GET /orders`, `/orders/:id`, `/orders/lookup`,
 `POST /orders/:id/pay`, `GET /orders/:id/cancellation-quote`, `POST /orders/:id/cancel`
 **Cart** — `GET /cart`, `POST /cart/items`, `PATCH|DELETE /cart/items/:id`,
-`POST /cart/checkout` (guest carts use the returned `X-Cart-Token`; inventory is held only at checkout)
+`POST /cart/checkout` (guest carts use the returned `X-Cart-Token`; inventory is held only at checkout).
+Add `checkOutDate` alongside `serviceDate` to book a stay — the item records `nights`,
+and order lines come back with `checkInDate` / `checkOutDate` / `nightlyPriceCents`.
 **Payments** — `POST /webhooks/payment`
 **Tickets** — `GET /tickets`, `/tickets/:ticketNumber`, `POST /tickets/:ticketNumber/transfer`,
 `/tickets/transfer/:token/accept`, `/tickets/recover`
@@ -378,7 +389,7 @@ Operations: `GET /health`, `GET /ready` (per-dependency readiness).
 ## Testing
 
 ```bash
-bash scripts/smoke-test.sh    # 62 checks, requires both services running
+bash scripts/smoke-test.sh    # 67 checks, requires both services running
 bash scripts/mobile-check.sh  # 40 checks, responsive layer regression guard
 pnpm typecheck                # strict TS across api + web
 pnpm --filter @easytrip/web build

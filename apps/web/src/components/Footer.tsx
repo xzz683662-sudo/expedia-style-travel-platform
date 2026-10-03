@@ -57,11 +57,6 @@ export function Footer({ locale }: { locale: LocaleCode }) {
               </span>
             </div>
             <p style={{ maxWidth: 340 }}>{t('footer.aboutText')}</p>
-            <p className="tiny subtle">
-              {locale === 'zh'
-                ? '演示环境：支付走内置模拟网关，不会产生真实扣款。'
-                : 'Demo platform. Payments run against a built-in mock gateway — no real charges are made.'}
-            </p>
           </div>
 
           {GROUPS.map((group) => (

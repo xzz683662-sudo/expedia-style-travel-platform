@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { createPendingOrder } from '../modules/booking/engine';
 import { computeQuote } from '../modules/pricing/engine';
+import { assertStayLengthAllowed, stayNights } from '../modules/inventory/engine';
 import { resolveLocale } from '../plugins/auth';
 import { AppError, assertFound } from '../utils/errors';
 import { toServiceDate } from '../utils/date';
@@ -24,11 +25,24 @@ type CartTicketType = Prisma.TicketTypeGetPayload<{
   include: { product: { include: { priceRules: true } }; priceRules: true };
 }>;
 
+/**
+ * Prices one cart line.
+ *
+ * `nights` is what activates the `LENGTH_OF_STAY` rule family. It was optional
+ * in the pricing context and nothing ever passed it, so a "3 nights for the price
+ * of 2" rule would have priced every stay at one night's rate — the rule kind
+ * existed, and was entirely dormant.
+ *
+ * The returned figure is per room per night. `lineTotal` multiplies it by rooms
+ * and nights, which is why a stay line and a ticket line need different totals
+ * for the same unit price.
+ */
 function quoteUnitPrice(
   ticketType: CartTicketType,
   serviceDate: Date,
   quantity: number,
   timeSlot: string,
+  nights = 1,
 ): number {
   const quote = computeQuote({
     basePriceCents: ticketType.basePriceCents,
@@ -49,7 +63,7 @@ function quoteUnitPrice(
       endsAt: rule.endsAt,
       active: rule.active,
     })),
-    context: { serviceDate, quoteDate: new Date(), quantity, timeSlot },
+    context: { serviceDate, quoteDate: new Date(), quantity, timeSlot, nights },
   });
   return quote.totalPerUnitCents;
 }
@@ -184,12 +198,21 @@ async function cartPayload(cartId: string, locale: string) {
         optionName: ticketTranslation?.name ?? item.ticketType.name,
         serviceDate: item.serviceDate.toISOString().slice(0, 10),
         timeSlot: item.timeSlot,
+        // Stay fields are null for single-date lines, so the storefront can render
+        // "3 nights × 2 rooms" when they are present and fall back to a plain
+        // ticket row when they are not.
+        checkInDate: item.checkInDate?.toISOString().slice(0, 10) ?? null,
+        checkOutDate: item.checkOutDate?.toISOString().slice(0, 10) ?? null,
+        nights: item.nights,
+        roomTypeCode: item.roomTypeCode,
         quantity: item.quantity,
         minPerOrder: item.ticketType.minPerOrder,
         maxPerOrder: item.ticketType.maxPerOrder,
         unitPriceCents: item.unitPriceCents,
         currency: item.ticketType.currency,
-        lineTotalCents: item.unitPriceCents * item.quantity,
+        // A stay is per room per night, so a 3-night × 2-room line is 6 units at
+        // the nightly rate. A ticket line has nights = 1 and reduces to quantity.
+        lineTotalCents: item.unitPriceCents * item.quantity * (item.nights ?? 1),
       };
     }),
   };
@@ -210,6 +233,13 @@ export async function cartRoutes(app: FastifyInstance): Promise<void> {
         serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
         timeSlot: z.string().max(10).nullish(),
         quantity: z.number().int().min(1).max(20),
+        /**
+         * Stay range. Supplying `checkOutDate` makes this a multi-night stay:
+         * `serviceDate` is the first night and `checkOutDate` is the departure
+         * morning. Both optional so existing single-date callers are untouched.
+         */
+        checkOutDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+        roomTypeCode: z.string().max(40).optional(),
       })
       .parse(request.body);
 
@@ -232,6 +262,23 @@ export async function cartRoutes(app: FastifyInstance): Promise<void> {
     if (serviceDate.getTime() < toServiceDate(new Date()).getTime()) {
       throw AppError.validation('Service date cannot be in the past');
     }
+
+    // A stay is priced per room per night, so the line total is nights × rooms.
+    // A ticket line has no check-out, so nights is 1 and the two agree.
+    const nights = body.checkOutDate
+      ? stayNights(serviceDate, toServiceDate(body.checkOutDate)).length
+      : 1;
+    if (body.checkOutDate) {
+      // Enforce the property's stay length before anything is held or priced, so
+      // a 1-night booking against a 3-night minimum fails here rather than deep
+      // inside the booking engine.
+      const stay = await prisma.productStay.findUnique({
+        where: { productId: ticketType.productId },
+        select: { policies: true },
+      });
+      assertStayLengthAllowed(nights, stay?.policies);
+    }
+
     await prisma.$transaction(async (tx) => {
       const openCart = await lockOpenCart(tx, cart.id);
       const itemCount = await tx.cartItem.count({ where: { cartId: cart.id } });
@@ -248,8 +295,18 @@ export async function cartRoutes(app: FastifyInstance): Promise<void> {
           ticketTypeId: ticketType.id,
           serviceDate,
           timeSlot: body.timeSlot ?? null,
+          checkInDate: body.checkOutDate ? serviceDate : null,
+          checkOutDate: body.checkOutDate ? toServiceDate(body.checkOutDate) : null,
+          nights: body.checkOutDate ? nights : null,
+          roomTypeCode: body.roomTypeCode ?? null,
           quantity: body.quantity,
-          unitPriceCents: quoteUnitPrice(ticketType, serviceDate, body.quantity, body.timeSlot ?? ''),
+          unitPriceCents: quoteUnitPrice(
+            ticketType,
+            serviceDate,
+            body.quantity,
+            body.timeSlot ?? '',
+            nights,
+          ),
           locale: resolveLocale(request),
         },
       });
@@ -337,6 +394,11 @@ export async function cartRoutes(app: FastifyInstance): Promise<void> {
           serviceDate: item.serviceDate.toISOString().slice(0, 10),
           timeSlot: item.timeSlot,
           quantity: item.quantity,
+          // Stay range. Null for single-date items, and the booking engine treats
+          // a line without both dates as a normal one-day booking.
+          checkInDate: item.checkInDate?.toISOString().slice(0, 10) ?? null,
+          checkOutDate: item.checkOutDate?.toISOString().slice(0, 10) ?? null,
+          roomTypeCode: item.roomTypeCode,
         })),
         contactEmail: body.contactEmail,
         contactPhone: body.contactPhone,

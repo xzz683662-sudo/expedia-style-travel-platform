@@ -219,6 +219,56 @@ curl -fsS -X DELETE "$API/api/v1/wishlist/$PRODUCT_ID" -H "Authorization: Bearer
 WISHLIST=$(curl -fsS "$API/api/v1/wishlist" -H "Authorization: Bearer $TOKEN")
 check "customer can remove a saved product" "$(echo "$WISHLIST" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(!JSON.parse(d).some(i=>i.productId==='$PRODUCT_ID'))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
 
+head2 "Multi-night stay"
+# A hotel stay is sold per room per night. These assert the three properties
+# that distinguish it from a ticket: nights are billed, every night in the range
+# is held, and a range that cannot be fully satisfied leaves nothing behind.
+# `ticketTypeId` is not on a search hit — the option list comes from the product
+# detail, the same way the single-date checkout above resolves its own.
+STAY_SLUG=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1" | jget '.items.0.slug')
+STAY_TT=$(curl -fsS "$API/api/v1/products/$STAY_SLUG" | jget '.ticketTypes.0.id')
+if [[ -z "$STAY_TT" || "$STAY_TT" == "null" ]]; then
+  bad "no hotel ticket type available to test a stay"
+else
+  STAY_IN=$(node -e "const d=new Date();d.setDate(d.getDate()+40);console.log(d.toISOString().slice(0,10));")
+  STAY_OUT=$(node -e "const d=new Date();d.setDate(d.getDate()+43);console.log(d.toISOString().slice(0,10));")
+
+  STAY_CART=$(curl -fsS "$API/api/v1/cart" -H "Authorization: Bearer $TOKEN")
+  STAY_CART=$(curl -fsS -X POST "$API/api/v1/cart/items" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"ticketTypeId\":\"$STAY_TT\",\"serviceDate\":\"$STAY_IN\",\"checkOutDate\":\"$STAY_OUT\",\"quantity\":1}")
+  STAY_NIGHTS=$(echo "$STAY_CART" | jget '.items.0.nights')
+  STAY_UNIT=$(echo "$STAY_CART" | jget '.items.0.unitPriceCents')
+  STAY_TOTAL=$(echo "$STAY_CART" | jget '.items.0.lineTotalCents')
+  check "a stay cart line records its nights (${STAY_NIGHTS:-none}, expected 3)" "$([ "$STAY_NIGHTS" = "3" ] && echo true || echo false)"
+
+  # lineTotal must be unit x rooms x nights. Charging the nightly rate once is the
+  # bug this guards: the cart quotes 3 nights and the invoice bills 1.
+  STAY_EXPECTED=$(( ${STAY_UNIT:-0} * 3 ))
+  check "a stay line bills per night (${STAY_TOTAL:-0} of ${STAY_EXPECTED})" "$([ "${STAY_TOTAL:-0}" = "$STAY_EXPECTED" ] && echo true || echo false)"
+
+  STAY_CHECKOUT=$(curl -fsS -X POST "$API/api/v1/cart/checkout" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"contactEmail\":\"traveler@easytrip.test\",\"travelers\":[{\"fullName\":\"Smoke Stay\",\"dateOfBirth\":\"1990-01-01\"}]}")
+  STAY_ORDER_ID=$(echo "$STAY_CHECKOUT" | jget '.orderId')
+  check "a multi-night stay checks out (${STAY_ORDER_ID:-none})" "$([ -n "$STAY_ORDER_ID" ] && [ "$STAY_ORDER_ID" != "null" ] && echo true || echo false)"
+
+  # Compare the order against its *own* line, not against the cart figure above:
+  # the two are priced independently (a room's TicketType carries its own
+  # currency and base price), so only the per-night relationship is meaningful.
+  # This is the assertion that catches the real defect — a 3-night booking
+  # invoiced for one night.
+  STAY_ORDER_DETAIL=$(curl -fsS "$API/api/v1/orders/$STAY_ORDER_ID" -H "Authorization: Bearer $TOKEN")
+  STAY_ORDER_NIGHTS=$(echo "$STAY_ORDER_DETAIL" | jget '.items.0.nights')
+  STAY_ORDER_LINE=$(echo "$STAY_ORDER_DETAIL" | jget '.items.0.lineTotalCents')
+  STAY_ORDER_NIGHTLY=$(echo "$STAY_ORDER_DETAIL" | jget '.items.0.unitPriceCents')
+  STAY_ORDER_EXPECTED=$(( ${STAY_ORDER_NIGHTLY:-0} * ${STAY_ORDER_NIGHTS:-0} ))
+  check "the stay order keeps its night count (${STAY_ORDER_NIGHTS:-none})" "$([ "${STAY_ORDER_NIGHTS:-0}" -ge 2 ] 2>/dev/null && echo true || echo false)"
+  check "the stay order bills night x night (${STAY_ORDER_LINE:-0} of ${STAY_ORDER_EXPECTED})" "$([ "${STAY_ORDER_LINE:-0}" = "$STAY_ORDER_EXPECTED" ] && [ "${STAY_ORDER_EXPECTED:-0}" -gt 0 ] && echo true || echo false)"
+fi
+
 head2 "Checkout"
 # Pick a date ~10 days out so inventory exists.
 SERVICE_DATE=$(node -e "const d=new Date();d.setDate(d.getDate()+10);console.log(d.toISOString().slice(0,10));")

@@ -1,7 +1,7 @@
 import { InventoryMode, InventoryStatus, type Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma';
 import { logger } from '../../lib/logger';
-import { formatServiceDate, minutesFromNow, toServiceDate } from '../../utils/date';
+import { eachDay, formatServiceDate, minutesFromNow, toServiceDate } from '../../utils/date';
 import { AppError } from '../../utils/errors';
 import { generateToken } from '../../utils/ids';
 import { emitInventoryAlert, type InventoryAlertLevel } from '../realtime/notify';
@@ -170,6 +170,8 @@ export function sellable(record: {
 
 type InventoryRow = {
   id: string;
+  /** Carried so a multi-night failure can name the night that was short. */
+  serviceDate: Date;
   capacityTotal: number;
   capacityHeld: number;
   capacitySold: number;
@@ -271,8 +273,23 @@ async function resolveInventoryMode(ticketTypeId: string): Promise<InventoryMode
   return ticketType?.inventoryMode ?? InventoryMode.PER_DATE;
 }
 
-/** Releases a hold and returns its units to the pool. Idempotent. */
+/**
+ * Releases a hold and returns its units to the pool. Idempotent.
+ *
+ * Dispatches on the token: a stay's token resolves to an `InventoryHoldGroup`
+ * and is fanned out across every night, anything else falls through to the
+ * single-record path below. Doing the dispatch here rather than at each call
+ * site is what lets a 3-night booking release all three nights without a single
+ * existing caller changing — the booking engine already passes the same token
+ * it received, so it has no way to know whether it is holding one night or ten.
+ */
 export async function releaseHold(holdToken: string): Promise<void> {
+  const group = await prisma.inventoryHoldGroup.findUnique({
+    where: { holdToken },
+    select: { id: true },
+  });
+  if (group) return releaseHoldGroup(holdToken);
+
   const hold = await prisma.inventoryHold.findUnique({ where: { holdToken } });
   if (!hold || hold.status !== 'ACTIVE') return;
 
@@ -296,8 +313,19 @@ export async function releaseHold(holdToken: string): Promise<void> {
   logger.info('inventory.release', { holdToken, quantity: hold.quantity });
 }
 
-/** Converts a hold into a sale: held -> sold. Called after payment capture. */
+/**
+ * Converts a hold into a sale: held -> sold. Called after payment capture.
+ *
+ * Dispatches to the group path for a stay, exactly as `releaseHold` does — see
+ * the note there for why the branching lives at the entry point.
+ */
 export async function consumeHold(holdToken: string): Promise<void> {
+  const group = await prisma.inventoryHoldGroup.findUnique({
+    where: { holdToken },
+    select: { id: true },
+  });
+  if (group) return consumeHoldGroup(holdToken);
+
   const hold = await prisma.inventoryHold.findUnique({
     where: { holdToken },
     include: {
@@ -515,4 +543,309 @@ export async function seedInventoryWindow(params: {
   }
 
   return created;
+}
+
+// ===========================================================================
+// Multi-night stays
+// ===========================================================================
+
+/** Hard ceiling on a single stay, so a bad range cannot ask for 10^6 holds. */
+const MAX_STAY_NIGHTS = 30;
+
+/** A date range plus the rooms booked into it. */
+export type StayHoldRequest = {
+  ticketTypeId: string;
+  userId?: string | null;
+  cartId?: string | null;
+  /** First night. Inclusive. */
+  checkIn: Date;
+  /** Departure morning. Exclusive — a 3-night stay checks out on checkIn + 3. */
+  checkOut: Date;
+  /** Rooms (not guests). Each room needs one hold on every night. */
+  quantity: number;
+  /** Room type within `ProductStay.roomTypes`; carried for traceability only. */
+  roomTypeCode?: string | null;
+};
+
+export type StayHoldResult = {
+  holdToken: string;
+  groupId: string;
+  checkIn: Date;
+  checkOut: Date;
+  nights: number;
+  quantity: number;
+  expiresAt: Date;
+  inventoryRecordIds: string[];
+};
+
+/**
+ * Validates a stay range and returns the individual nights it occupies.
+ *
+ * Checkout is exclusive, matching how every hotel quotes "3 nights" — a guest
+ * arriving Monday and leaving Thursday booked 3 nights, not 4. `eachDay` is
+ * therefore given the last *occupied* night, not the checkout date.
+ */
+export function stayNights(checkIn: Date, checkOut: Date): Date[] {
+  const from = toServiceDate(checkIn);
+  const to = toServiceDate(checkOut);
+  const nights = Math.round((to.getTime() - from.getTime()) / 86_400_000);
+
+  if (!Number.isFinite(nights) || nights <= 0) {
+    throw AppError.badRequest('Check-out must be at least one night after check-in');
+  }
+  if (nights > MAX_STAY_NIGHTS) {
+    throw AppError.badRequest(`A single stay cannot exceed ${MAX_STAY_NIGHTS} nights`);
+  }
+
+  // Last occupied night is the day before checkout.
+  const lastNight = new Date(from.getTime() + (nights - 1) * 86_400_000);
+  return eachDay(from, lastNight);
+}
+
+/**
+ * Enforces `minNights` / `maxNights` from `ProductStay.policies`.
+ *
+ * Called before any hold is placed. Doing it afterwards would mean rolling back
+ * holds we just took, and a partial rollback that fails leaves the property with
+ * a phantom block on a real night.
+ */
+export function assertStayLengthAllowed(nights: number, policies: unknown): void {
+  if (!policies || typeof policies !== 'object') return;
+  const { minNights, maxNights } = policies as { minNights?: number; maxNights?: number };
+
+  if (typeof minNights === 'number' && nights < minNights) {
+    throw AppError.badRequest(`This property requires a minimum stay of ${minNights} nights`);
+  }
+  if (typeof maxNights === 'number' && nights > maxNights) {
+    throw AppError.badRequest(`This property allows at most ${maxNights} nights per stay`);
+  }
+}
+
+/**
+ * Holds every night of a stay, or none of them.
+ *
+ * All-or-nothing is the whole point. A 3-night booking that quietly blocks only
+ * nights 1 and 3 because night 2 sold out is worse than a clear failure: the
+ * guest thinks they have a room, and the property has a phantom reservation on
+ * two dates. So availability is checked for every night first, then all holds are
+ * written inside one transaction — any optimistic-lock miss aborts the set and
+ * the transaction rolls back, leaving no partial state.
+ */
+export async function placeStayHold(request: StayHoldRequest): Promise<StayHoldResult> {
+  const { ticketTypeId, quantity, userId = null, cartId = null } = request;
+  if (quantity <= 0) throw AppError.badRequest('Room quantity must be positive');
+
+  const dates = stayNights(request.checkIn, request.checkOut);
+  const inventoryMode = await resolveInventoryMode(ticketTypeId);
+
+  // Create any missing night rows before the transaction, so the transaction
+  // only ever performs the guarded updates. `ensureInventoryRecord` is itself
+  // race-safe (it re-reads on a unique violation).
+  const records: InventoryRow[] = [];
+  for (const date of dates) {
+    records.push(await ensureInventoryRecord({ ticketTypeId, serviceDate: date, timeSlot: '' }));
+  }
+
+  // Pre-flight: identify the short nights before taking anything, so the error
+  // names the actual date rather than failing on an opaque lock miss.
+  for (const record of records) {
+    const available = sellable({ ...record, inventoryMode });
+    if (available < quantity) {
+      throw AppError.inventoryUnavailable(
+        available === 0
+          ? `Sold out on ${formatServiceDate(record.serviceDate)}`
+          : `Only ${available} room${available === 1 ? '' : 's'} left on ${formatServiceDate(record.serviceDate)}`,
+        { date: formatServiceDate(record.serviceDate), available, requested: quantity },
+      );
+    }
+  }
+
+  const holdToken = generateToken(18);
+  const expiresAt = minutesFromNow(15);
+
+  const { group, holds } = await prisma.$transaction(async (tx) => {
+    const createdGroup = await tx.inventoryHoldGroup.create({
+      data: {
+        holdToken,
+        cartId,
+        userId,
+        productId: (await tx.ticketType.findUniqueOrThrow({
+          where: { id: ticketTypeId },
+          select: { productId: true },
+        })).productId,
+        checkInDate: dates[0],
+        // The departure morning, not the last occupied night. `dates` ends one
+        // day earlier because checkout is exclusive, so persisting
+        // `dates[n-1]` here would record a guest as departing a day before they
+        // actually leave — and any later `differenceInDays(checkOut, checkIn)`
+        // read back off this row would report one night fewer than booked.
+        checkOutDate: toServiceDate(request.checkOut),
+        nights: dates.length,
+        quantity,
+        status: 'ACTIVE',
+        expiresAt,
+      },
+    });
+
+    const createdHolds = [];
+    for (const record of records) {
+      // Same optimistic guard as `placeHold`: only claim when nobody else moved
+      // the counters since we read them.
+      const claimed = await tx.inventoryRecord.updateMany({
+        where: {
+          id: record.id,
+          version: record.version,
+          status: InventoryStatus.OPEN,
+        },
+        data: {
+          capacityHeld: { increment: quantity },
+          version: { increment: 1 },
+        },
+      });
+      if (claimed.count === 0) {
+        // Another checkout won this night between our read and our write. Throw
+        // so the transaction discards every hold placed so far.
+        throw AppError.inventoryUnavailable(
+          `Only ${formatServiceDate(record.serviceDate)} was just taken — please pick another room`,
+          { date: formatServiceDate(record.serviceDate) },
+        );
+      }
+
+      createdHolds.push(
+        await tx.inventoryHold.create({
+          data: {
+            holdToken: generateToken(18),
+            groupId: createdGroup.id,
+            cartId,
+            userId,
+            inventoryRecordId: record.id,
+            quantity,
+            status: 'ACTIVE',
+            expiresAt,
+          },
+        }),
+      );
+    }
+
+    return { group: createdGroup, holds: createdHolds };
+  });
+
+  logger.info('inventory.stay_hold', {
+    holdToken,
+    groupId: group.id,
+    nights: dates.length,
+    quantity,
+    expiresAt: expiresAt.toISOString(),
+  });
+
+  // Realtime signals are best-effort and must never fail a booking, so they go
+  // out after the transaction commits rather than inside it.
+  for (const record of records) {
+    void emitStockAlert({
+      ticketTypeId,
+      serviceDate: record.serviceDate,
+      timeSlot: '',
+      knownRemaining: sellable({ ...record, inventoryMode }) - quantity,
+    });
+  }
+
+  return {
+    holdToken,
+    groupId: group.id,
+    checkIn: dates[0],
+    checkOut: dates[dates.length - 1],
+    nights: dates.length,
+    quantity,
+    expiresAt,
+    inventoryRecordIds: holds.map((h) => h.inventoryRecordId),
+  };
+}
+
+/**
+ * Releases every night of a stay.
+ *
+ * Safe to call for a single-date hold too: the group is optional, and a token
+ * with no group falls through to the original single-record path. That keeps
+ * `releaseHold` correct for both shapes without the caller knowing which it has.
+ */
+/**
+ * Releases every night of a stay.
+ *
+ * Internal: callers reach this through `releaseHold`, which dispatches here when
+ * the token resolves to a group. Exported for direct use only where a caller
+ * already knows it holds a group token.
+ */
+export async function releaseHoldGroup(holdToken: string): Promise<void> {
+  const group = await prisma.inventoryHoldGroup.findUnique({ where: { holdToken } });
+  if (!group) return releaseHold(holdToken);
+  if (group.status !== 'ACTIVE') return;
+
+  await prisma.$transaction(async (tx) => {
+    // Only the ACTIVE -> RELEASED transition decrements, so a concurrent or
+    // repeated release cannot double-return the rooms.
+    const claimed = await tx.inventoryHoldGroup.updateMany({
+      where: { id: group.id, status: 'ACTIVE' },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    });
+    if (claimed.count !== 1) return;
+
+    const children = await tx.inventoryHold.findMany({
+      where: { groupId: group.id, status: 'ACTIVE' },
+    });
+    await tx.inventoryHold.updateMany({
+      where: { id: { in: children.map((c) => c.id) } },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    });
+
+    for (const child of children) {
+      await tx.inventoryRecord.update({
+        where: { id: child.inventoryRecordId },
+        data: {
+          capacityHeld: { decrement: child.quantity },
+          version: { increment: 1 },
+        },
+      });
+    }
+  });
+
+  logger.info('inventory.stay_release', { holdToken, nights: group.nights, quantity: group.quantity });
+}
+
+/** Consumes every night of a stay: held -> sold, in one statement per night. */
+export async function consumeHoldGroup(holdToken: string): Promise<void> {
+  const group = await prisma.inventoryHoldGroup.findUnique({
+    where: { holdToken },
+    include: { holds: { include: { inventoryRecord: true } } },
+  });
+  if (!group) return consumeHold(holdToken);
+  if (group.status === 'CONSUMED') return; // idempotent
+  if (group.status !== 'ACTIVE') throw AppError.inventoryExpired('Hold is no longer active');
+
+  await prisma.$transaction(async (tx) => {
+    const claimed = await tx.inventoryHoldGroup.updateMany({
+      where: { id: group.id, status: 'ACTIVE' },
+      data: { status: 'CONSUMED', releasedAt: new Date() },
+    });
+    if (claimed.count !== 1) return;
+
+    await tx.inventoryHold.updateMany({
+      where: { groupId: group.id, status: 'ACTIVE' },
+      data: { status: 'CONSUMED', releasedAt: new Date() },
+    });
+
+    // held -> sold in one statement each, so no night's sellable count
+    // transiently appears higher than it is.
+    for (const child of group.holds) {
+      await tx.$executeRaw`
+        UPDATE "InventoryRecord"
+        SET "capacityHeld" = "capacityHeld" - ${child.quantity},
+            "capacitySold" = "capacitySold" + ${child.quantity},
+            "version" = "version" + 1,
+            "updatedAt" = NOW()
+        WHERE id = ${child.inventoryRecordId}
+      `;
+    }
+  });
+
+  logger.info('inventory.stay_consume', { holdToken, nights: group.nights, quantity: group.quantity });
 }

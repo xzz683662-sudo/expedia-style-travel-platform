@@ -2,12 +2,12 @@ import { OrderStatus, PaymentChannel, PaymentStatus, TicketStatus, type PriceRul
 import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
-import { formatServiceDate, hoursBetween, toServiceDate } from '../../utils/date';
+import { differenceInDays, formatServiceDate, hoursBetween, toServiceDate } from '../../utils/date';
 import { AppError, assertFound } from '../../utils/errors';
 import { generateBarcode, generateOrderNumber, generateTicketNumber } from '../../utils/ids';
 import { allocate, applyBps, sumCents } from '../../utils/money';
 import { computeQuote, type Quote } from '../pricing/engine';
-import { consumeHold, placeHold, releaseHold, returnSoldUnits } from '../inventory/engine';
+import { consumeHold, placeHold, placeStayHold, releaseHold, returnSoldUnits } from '../inventory/engine';
 import { getPaymentGateway, isOfflineMethod } from '../payments/gateway';
 import { createInAppNotification, emitOrderCreated, emitOrderEvent, emitPaymentEvent } from '../realtime/notify';
 import { generateTicketArtifacts } from '../ticketing/issuer';
@@ -36,6 +36,15 @@ export type CheckoutLine = {
   timeSlot?: string | null;
   quantity: number;
   holdToken?: string;
+  /**
+   * Stay range. Present only for multi-night products; a single-date line omits
+   * both and behaves exactly as before. `serviceDate` must equal `checkInDate`
+   * when both are set — it is kept in sync so date-only queries (calendar,
+   * availability, order listings) do not need to learn about stays.
+   */
+  checkInDate?: string | null;
+  checkOutDate?: string | null;
+  roomTypeCode?: string | null;
 };
 
 export type CheckoutInput = {
@@ -118,6 +127,11 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
     };
     serviceDate: Date;
     quote: Quote;
+    /** Stay nights; 1 for every non-stay line. */
+    nights: number;
+    checkIn: Date;
+    checkOut: Date;
+    roomTypeCode: string | null;
   };
 
   const pricedLines: PricedLine[] = [];
@@ -136,6 +150,50 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
     const serviceDate = toServiceDate(line.serviceDate);
     if (serviceDate.getTime() < toServiceDate(new Date()).getTime()) {
       throw AppError.validation('Service date cannot be in the past');
+    }
+
+    // --- Stay lines: derive nights and enforce the property's length policy --
+    // `nights` is what activates LENGTH_OF_STAY. Passing it unconditionally as 1
+    // for non-stay lines keeps that rule kind inert on single-date products
+    // instead of silently applying a "1 night" condition to an attraction ticket.
+    const isStay = Boolean(line.checkInDate && line.checkOutDate);
+    let nights = 1;
+    let checkIn = serviceDate;
+    let checkOut = serviceDate;
+
+    if (isStay) {
+      checkIn = toServiceDate(line.checkInDate as string);
+      checkOut = toServiceDate(line.checkOutDate as string);
+      if (checkOut.getTime() <= checkIn.getTime()) {
+        throw AppError.validation('Check-out must be after check-in');
+      }
+      nights = differenceInDays(checkOut, checkIn);
+      // A stay spanning a month is a data-entry error far more often than a real
+      // booking. Cap it rather than letting one line try to hold 400 room-nights.
+      if (nights > 30) {
+        throw AppError.validation('Stays are limited to 30 nights');
+      }
+      const stay = await prisma.productStay.findUnique({
+        where: { productId: ticketType.productId },
+        select: { policies: true },
+      });
+      const policies = (stay?.policies ?? {}) as {
+        minNights?: number | null;
+        maxNights?: number | null;
+      };
+      // `policies` is a Json column and the backfill writes an explicit `null`
+      // for every limit it could not derive, rather than omitting the key. So a
+      // missing limit arrives as JSON null, which is `!== undefined` — guarding
+      // on `!== undefined` alone reads "no maximum" as "maximum of null", which
+      // then formats as 0 and rejects every stay. Treat null and undefined alike.
+      const minNights = typeof policies.minNights === 'number' ? policies.minNights : null;
+      const maxNights = typeof policies.maxNights === 'number' ? policies.maxNights : null;
+      if (minNights !== null && nights < minNights) {
+        throw AppError.validation(`This property requires a minimum stay of ${minNights} nights`);
+      }
+      if (maxNights !== null && nights > maxNights) {
+        throw AppError.validation(`This property allows a maximum stay of ${maxNights} nights`);
+      }
     }
 
     const quote = computeQuote({
@@ -162,10 +220,11 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
         quoteDate: new Date(),
         quantity: line.quantity,
         timeSlot: line.timeSlot ?? '',
+        nights,
       },
     });
 
-    pricedLines.push({ line, ticketType, serviceDate, quote });
+    pricedLines.push({ line, ticketType, serviceDate, quote, nights, checkIn, checkOut, roomTypeCode: line.roomTypeCode ?? null });
   }
 
   const currency = pricedLines[0].ticketType.currency || config.booking.defaultCurrency;
@@ -175,13 +234,25 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
 
   for (const priced of pricedLines) {
     try {
-      const hold = await placeHold({
-        ticketTypeId: priced.ticketType.id,
-        serviceDate: priced.serviceDate,
-        timeSlot: priced.line.timeSlot ?? "",
-        quantity: priced.line.quantity,
-        userId: input.userId ?? null,
-      });
+      // A stay claims the same room on every night, so it needs the multi-date
+      // hold. Single-date lines keep the original path untouched.
+      const hold =
+        priced.nights > 1
+          ? await placeStayHold({
+              ticketTypeId: priced.ticketType.id,
+              checkIn: priced.checkIn,
+              checkOut: priced.checkOut,
+              quantity: priced.line.quantity,
+              userId: input.userId ?? null,
+              roomTypeCode: priced.roomTypeCode,
+            })
+          : await placeHold({
+              ticketTypeId: priced.ticketType.id,
+              serviceDate: priced.serviceDate,
+              timeSlot: priced.line.timeSlot ?? "",
+              quantity: priced.line.quantity,
+              userId: input.userId ?? null,
+            });
       holds.push({ holdToken: hold.holdToken, expiresAt: hold.expiresAt.toISOString() });
     } catch (error) {
       // Roll back the holds we already took so we never leak capacity.
@@ -192,10 +263,16 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
 
   try {
     // --- 3. Persist the order snapshot ------------------------------------
-    const subtotal = sumCents(pricedLines.map((p) => p.quote.unitPriceCents * p.line.quantity));
-    const taxTotal = sumCents(pricedLines.map((p) => p.quote.taxCents * p.line.quantity));
-    const feeTotal = sumCents(pricedLines.map((p) => p.quote.feeCents * p.line.quantity));
-    const markupTotal = sumCents(pricedLines.map((p) => p.quote.markupCents * p.line.quantity));
+    // A stay line is priced per room per night, so its multiplier is
+    // `nights * quantity`; a ticket line has nights = 1 and reduces to
+    // `quantity`. Using one expression keeps the four totals consistent with each
+    // other — they must all scale by the same factor or the ledger disagrees.
+    const lineUnits = (p: PricedLine) => p.nights * p.line.quantity;
+
+    const subtotal = sumCents(pricedLines.map((p) => p.quote.unitPriceCents * lineUnits(p)));
+    const taxTotal = sumCents(pricedLines.map((p) => p.quote.taxCents * lineUnits(p)));
+    const feeTotal = sumCents(pricedLines.map((p) => p.quote.feeCents * lineUnits(p)));
+    const markupTotal = sumCents(pricedLines.map((p) => p.quote.markupCents * lineUnits(p)));
 
     // Coupons discount the pre-tax subtotal.
     const coupon = input.couponCode
@@ -227,17 +304,34 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
     // back to the total so no cent is lost or invented.
     const discountPerLine = allocate(
       discountTotal,
-      pricedLines.map((p) => p.quote.unitPriceCents * p.line.quantity),
+      // Weight by the same `lineUnits` the subtotal uses. Weighting by
+      // `quantity` alone made a coupon spread as if every line were one night,
+      // so the per-line discount stopped summing to `discountTotal` against a
+      // multi-night subtotal — and per-item refunds, which reuse this split,
+      // would refund the wrong amounts.
+      pricedLines.map((p) => p.quote.unitPriceCents * lineUnits(p)),
     );
 
     const lineTotals = pricedLines.map((pricedItem, index) => {
       const lineDiscount = discountPerLine[index] ?? 0;
-      const lineSubtotalAfterDiscount = pricedItem.quote.unitPriceCents * pricedItem.line.quantity - lineDiscount;
       const quantity = pricedItem.line.quantity;
+      // A stay is sold per room per night, so the line subtotal is
+      // unit x rooms x nights. Omitting `nights` here charges a 3-night booking
+      // for one night: the customer is quoted 616.00 x 3 in the cart and then
+      // invoiced 616.00. `nights` is 1 for single-date lines, so this reduces to
+      // the original quantity-only arithmetic.
+      const unitsBilled = quantity * pricedItem.nights;
+      const lineSubtotalAfterDiscount = pricedItem.quote.unitPriceCents * unitsBilled - lineDiscount;
       // Re-derive per-unit tax/fee on the discounted base so tax is never
       // collected on money the customer did not pay.
-      const taxCents = Math.round((pricedItem.quote.taxCents * lineSubtotalAfterDiscount) / (pricedItem.quote.totalPerUnitCents * quantity || 1));
-      const feeCents = Math.round((pricedItem.quote.feeCents * lineSubtotalAfterDiscount) / (pricedItem.quote.totalPerUnitCents * quantity || 1));
+      const taxCents = Math.round(
+        (pricedItem.quote.taxCents * lineSubtotalAfterDiscount) /
+          (pricedItem.quote.totalPerUnitCents * unitsBilled || 1),
+      );
+      const feeCents = Math.round(
+        (pricedItem.quote.feeCents * lineSubtotalAfterDiscount) /
+          (pricedItem.quote.totalPerUnitCents * unitsBilled || 1),
+      );
       const totalCents = lineSubtotalAfterDiscount + taxCents + feeCents;
       return { taxCents, feeCents, totalCents, lineDiscount };
     });
@@ -274,7 +368,7 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
               const quantity = pricedItem.line.quantity;
               const commissionBps = pricedItem.ticketType.product.merchant?.commissionBps ?? config.booking.platformFeeBps;
               const netAmount = applyBps(
-                pricedItem.quote.unitPriceCents * quantity - lineTotals[index].lineDiscount,
+                pricedItem.quote.unitPriceCents * quantity * pricedItem.nights - lineTotals[index].lineDiscount,
                 commissionBps,
               );
               return {
@@ -288,6 +382,12 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
                 ticketTypeCode: pricedItem.ticketType.code,
                 serviceDate: pricedItem.serviceDate,
                 timeSlot: pricedItem.line.timeSlot ?? null,
+                // Stay snapshot — all null for single-date lines.
+                checkInDate: pricedItem.nights > 1 ? pricedItem.checkIn : null,
+                checkOutDate: pricedItem.nights > 1 ? pricedItem.checkOut : null,
+                nights: pricedItem.nights > 1 ? pricedItem.nights : null,
+                roomTypeCode: pricedItem.roomTypeCode,
+                nightlyPriceCents: pricedItem.nights > 1 ? pricedItem.quote.unitPriceCents : null,
                 quantity,
                 adultCount: quantity,
                 baseUnitPriceCents: pricedItem.quote.basePriceCents,
@@ -549,7 +649,25 @@ export async function confirmPaidOrder(orderId: string, providerChargeId?: strin
 
   // Move holds to sold *after* the order transaction committed, so a failure
   // here can be retried without double-issuing tickets.
-  for (const hold of await prisma.inventoryHold.findMany({ where: { userId: order.userId, status: 'ACTIVE' } })) {
+  //
+  // Stay holds are reached through their group, not their child rows: a 3-night
+  // booking holds three child `InventoryHold`s under one group token, and each
+  // child's own token resolves to the single-record path. Consuming the children
+  // directly would sell the nights but leave the group ACTIVE, which the TTL
+  // sweeper would then treat as a live claim.
+  const stayGroups = await prisma.inventoryHoldGroup.findMany({
+    where: { userId: order.userId, status: 'ACTIVE' },
+    select: { holdToken: true },
+  });
+  for (const group of stayGroups) {
+    await consumeHold(group.holdToken).catch(() => undefined);
+  }
+
+  const singleHolds = await prisma.inventoryHold.findMany({
+    where: { userId: order.userId, status: 'ACTIVE', groupId: null },
+    select: { holdToken: true },
+  });
+  for (const hold of singleHolds) {
     await consumeHold(hold.holdToken).catch(() => undefined);
   }
 

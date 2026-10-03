@@ -297,6 +297,7 @@ model Product {
 
   ticketTypes    TicketType[]
   cartItems      CartItem[]
+  holdGroups     InventoryHoldGroup[]
   media          ProductMedia[]
   priceRules     PriceRule[]
   tags           ProductTag[]
@@ -778,6 +779,7 @@ model Cart {
 
   items CartItem[]
   holds InventoryHold[]
+  holdGroups InventoryHoldGroup[]
 
   @@index([userId, status])
 }
@@ -792,6 +794,18 @@ model CartItem {
   ticketType     TicketType @relation(fields: [ticketTypeId], references: [id])
   serviceDate    DateTime   @db.Date
   timeSlot       String?
+  /// Stay range for multi-night products. Null for single-date products, which
+  /// keep using `serviceDate` alone — so every existing cart row and every
+  /// single-date code path is unaffected.
+  ///
+  /// `serviceDate` mirrors `checkInDate` when both are set, so existing queries
+  /// that filter or sort on `serviceDate` keep returning the right rows without
+  /// knowing stays exist. Nights = differenceInDays(checkOutDate, checkInDate).
+  checkInDate    DateTime?  @db.Date
+  checkOutDate   DateTime?  @db.Date
+  nights         Int?
+  /// Room type code within `ProductStay.roomTypes`. Null = "the only room we sell".
+  roomTypeCode   String?
   quantity       Int
   unitPriceCents Int
   locale         String     @default("en-US")
@@ -802,9 +816,16 @@ model CartItem {
 }
 
 // A short-lived claim on inventory, released by the booking engine.
+//
+// One row per *unit of time claimed*. A single-date attraction has exactly one.
+// A 3-night stay has three, all sharing one hold group's token — that is how a
+// multi-night booking occupies every night atomically without this table needing
+// to know it is part of a set.
 model InventoryHold {
   id                String          @id @default(cuid())
   holdToken         String          @unique
+  groupId           String?
+  group             InventoryHoldGroup? @relation(fields: [groupId], references: [id], onDelete: Cascade)
   cartId            String?
   cart              Cart?           @relation(fields: [cartId], references: [id])
   userId            String?
@@ -818,6 +839,55 @@ model InventoryHold {
 
   @@index([status, expiresAt])
   @@index([userId])
+  @@index([groupId])
+}
+
+/// Every hold placed by one checkout attempt, across all of its dates.
+///
+/// Why a group exists
+/// -----------------
+/// `InventoryHold` claims one `InventoryRecord`, which is one (ticketType, date,
+/// slot) row — structurally single-date. A hotel stay needs the same room held on
+/// every night of the range, and it must be all-or-nothing: if night 3 is sold out
+/// then nights 1 and 2 must not stay blocked.
+///
+/// Rather than reshape `InventoryHold` (and with it `releaseHold`/`consumeHold`
+/// and every existing caller), a group owns the token and the children own the
+/// arithmetic. Release and consume look the group up by token and fan out, so
+/// their public signatures — and every call site — stay exactly as they were.
+///
+/// A single-date product still creates a group, with one child. Uniformity matters
+/// here: two divergent code paths for "one night" vs "many" is how the single-date
+/// case quietly rots.
+model InventoryHoldGroup {
+  id         String   @id @default(cuid())
+  /// The token the booking engine already passes to release/consume. Unique so a
+  /// token resolves to exactly one group, and to exactly one row when no children
+  /// exist yet.
+  holdToken  String   @unique
+  cartId     String?
+  cart       Cart?    @relation(fields: [cartId], references: [id])
+  userId     String?
+  productId  String
+  product    Product  @relation(fields: [productId], references: [id])
+  /// HOTEL_ROOM / CRUISE / RENTAL_CAR: the booking spans a date range. Otherwise
+  /// the group carries a single date and `nights` is 1.
+  checkInDate DateTime? @db.Date
+  checkOutDate DateTime? @db.Date
+  nights      Int      @default(1)
+  /// Denormalised so a group listing does not have to aggregate its children.
+  /// `quantity` is the rooms/units; `nights * quantity` is the rows held.
+  quantity   Int      @default(1)
+  status     String   @default("ACTIVE") // ACTIVE | RELEASED | CONSUMED | EXPIRED
+  expiresAt  DateTime
+  releasedAt DateTime?
+  createdAt  DateTime @default(now())
+
+  holds InventoryHold[]
+
+  @@index([status, expiresAt])
+  @@index([userId])
+  @@index([productId])
 }
 
 // ===========================================================================
@@ -942,6 +1012,17 @@ model OrderItem {
 
   serviceDate DateTime @db.Date
   timeSlot    String?
+  /// Stay range snapshot. Copied from `CartItem` at checkout so the order keeps
+  /// the dates it was actually priced for even if the cart item is later edited.
+  /// Null for single-date products.
+  checkInDate  DateTime? @db.Date
+  checkOutDate DateTime? @db.Date
+  nights       Int?
+  roomTypeCode String?
+  /// Price of one room for one night. `unitPriceCents` on a stay line is the
+  /// per-night figure, matching how `Product.basePriceCents` reads for a hotel;
+  /// `lineTotalCents` is what the customer pays for the whole stay.
+  nightlyPriceCents Int?
   quantity    Int
   adultCount  Int      @default(0)
   childCount  Int      @default(0)
