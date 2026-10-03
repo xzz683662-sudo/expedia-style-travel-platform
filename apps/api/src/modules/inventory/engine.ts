@@ -397,8 +397,32 @@ export async function releaseExpiredHolds(limit = 200): Promise<number> {
     released += 1;
   }
 
-  if (released > 0) logger.info('inventory.expiry_sweep', { released });
-  return released;
+  // Sweep the stay groups themselves.
+  //
+  // The loop above expires child holds, which returns the rooms — so capacity is
+  // correct either way — but it leaves `InventoryHoldGroup.status` at ACTIVE
+  // forever. Verified against live data: a 3-night group whose three children had
+  // all expired still read ACTIVE with zero active children. Anything that reads
+  // groups (the TTL filter, an operator view) would then count it as a live
+  // claim. The same "writer without a reader" shape as the Phase 0 facets.
+  const expiredGroups = await prisma.inventoryHoldGroup.findMany({
+    where: { status: 'ACTIVE', expiresAt: { lt: new Date() } },
+    select: { id: true },
+    take: limit,
+  });
+  let releasedGroups = 0;
+  for (const group of expiredGroups) {
+    const claimed = await prisma.inventoryHoldGroup.updateMany({
+      where: { id: group.id, status: 'ACTIVE' },
+      data: { status: 'EXPIRED', releasedAt: new Date() },
+    });
+    if (claimed.count === 1) releasedGroups += 1;
+  }
+
+  if (released > 0 || releasedGroups > 0) {
+    logger.info('inventory.expiry_sweep', { released, releasedGroups });
+  }
+  return released + releasedGroups;
 }
 
 /** Cancels a booking and returns sold units back to the pool. */
