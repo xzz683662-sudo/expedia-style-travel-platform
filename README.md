@@ -239,6 +239,13 @@ stays the single transactional path. On top of it, `ProductStay`, `ProductFlight
 room grid, ordered flight segments, cabin categories, sailing ports. They are 1:1 extensions
 keyed on `productId`, so nothing in the booking path had to change to adopt them.
 
+`GET /products/:slug` returns whichever of `stay` / `flight` / `sailing` / `vehicle` / `bundle`
+applies, and `null` for the rest — a hotel does not report a ship. A stay carries its room
+grid, check-in/check-out times and policies; a flight its ordered segments, cabins and fare
+families; a cruise its ship, sailing ports and cabin categories; a package its components
+but deliberately no stored price. Expect `null` inside these blocks for anything a supplier
+feed has not supplied: a carrier code, a port, a sail date. Absent means "unknown", not zero.
+
 Inventory carries a `dimensionKey` alongside the existing `timeSlot`, so a hotel can hold
 stock per room type and a cruise per cabin without a new inventory table. Existing rows keep
 `dimensionKey = ""` and behave exactly as before.
@@ -398,7 +405,7 @@ Operations: `GET /health`, `GET /ready` (per-dependency readiness).
 ## Testing
 
 ```bash
-bash scripts/smoke-test.sh    # 73 checks, requires both services running
+bash scripts/smoke-test.sh    # 80 checks, requires both services running
 bash scripts/mobile-check.sh  # 40 checks, responsive layer regression guard
 pnpm typecheck                # strict TS across api + web
 pnpm --filter @easytrip/web build

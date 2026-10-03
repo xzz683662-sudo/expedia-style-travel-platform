@@ -170,6 +170,53 @@ check "product exposes ticket variants (${VARIANTS:-0})" "$([ "${VARIANTS:-0}" -
 CANCEL_POLICY=$(echo "$DETAIL" | jget '.cancellationPolicy.freeCancelHours')
 check "product exposes a cancellation policy (${CANCEL_POLICY:-none}h)" "$([ -n "$CANCEL_POLICY" ] && [ "$CANCEL_POLICY" != "null" ] && echo true || echo false)"
 
+head2 "Category depth (Phase 0 extensions)"
+# Every extension table was written by the backfill but, until now, read by
+# nothing — the detail endpoint omitted them entirely, so a hotel page could not
+# show its room grid or its check-in time. These assert the depth is reachable
+# *and* that it stays category-scoped: a hotel must not report a ship.
+json_field() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);const v=$1;console.log(v===null||v===undefined?'null':(typeof v==='object'?JSON.stringify(v):v))}catch{console.log('null')}})"; }
+
+STAY_DETAIL=$(curl -fsS "$API/api/v1/products/$FIRST_SLUG")
+STAY_EXT=$([ "$(echo "$STAY_DETAIL" | json_field 'o.stay')" != "null" ] && echo yes || echo no)
+FLIGHT_EXT=$(echo "$STAY_DETAIL" | json_field 'o.flight')
+SAILING_EXT=$(echo "$STAY_DETAIL" | json_field 'o.sailing')
+if [ "$STAY_EXT" = "yes" ]; then
+  STAY_ROOMS=$(echo "$STAY_DETAIL" | json_field 'o.stay.roomTypes')
+  check "a stay exposes its room grid" "$(echo "$STAY_ROOMS" | grep -q 'code' && echo true || echo false)"
+  STAY_TIMES=$(echo "$STAY_DETAIL" | json_field 'o.stay.checkInTime + "-" + o.stay.checkOutTime')
+  check "a stay exposes check-in and check-out times (${STAY_TIMES:-none})" "$([ -n "$STAY_TIMES" ] && [ "$STAY_TIMES" != "null" ] && echo true || echo false)"
+  check "a stay does not leak a flight or sailing block" "$([ "$FLIGHT_EXT" = "null" ] && [ "$SAILING_EXT" = "null" ] && echo true || echo false)"
+else
+  # `$FIRST_SLUG` is whatever the catalogue search returned first, which is not
+  # guaranteed to be a hotel. Reach for an actual one rather than asserting
+  # nothing.
+  STAY_SLUG=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1" | jget '.items.0.slug')
+  STAY_DETAIL=$(curl -fsS "$API/api/v1/products/$STAY_SLUG")
+  STAY_ROOMS=$(echo "$STAY_DETAIL" | json_field 'o.stay.roomTypes')
+  check "a hotel detail exposes its room grid" "$(echo "$STAY_ROOMS" | grep -q 'code' && echo true || echo false)"
+  check "a hotel detail does not leak a flight block" "$([ "$(echo "$STAY_DETAIL" | json_field 'o.flight')" = "null" ] && echo true || echo false)"
+fi
+
+FLIGHT_SLUG=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=1" | jget '.items.0.slug')
+FLIGHT_DETAIL=$(curl -fsS "$API/api/v1/products/$FLIGHT_SLUG")
+FLIGHT_SEGMENTS=$(echo "$FLIGHT_DETAIL" | json_field 'o.flight.segments')
+check "a flight exposes its segments" "$(echo "$FLIGHT_SEGMENTS" | grep -q 'airport' && echo true || echo false)"
+FLIGHT_CABINS=$(echo "$FLIGHT_DETAIL" | json_field 'o.flight.cabins')
+check "a flight exposes its cabins" "$(echo "$FLIGHT_CABINS" | grep -q 'code' && echo true || echo false)"
+
+CRUISE_SLUG=$(curl -fsS "$API/api/v1/search?type=CRUISE&limit=1" | jget '.items.0.slug')
+CRUISE_SHIP=$(curl -fsS "$API/api/v1/products/$CRUISE_SLUG" | json_field 'o.sailing.shipName')
+check "a cruise exposes its ship (${CRUISE_SHIP:-none})" "$([ -n "$CRUISE_SHIP" ] && [ "$CRUISE_SHIP" != "null" ] && echo true || echo false)"
+
+PKG_SLUG=$(curl -fsS "$API/api/v1/search?type=PACKAGE&limit=1" | jget '.items.0.slug')
+PKG_COMPONENTS=$(curl -fsS "$API/api/v1/products/$PKG_SLUG" | json_field 'o.bundle.components')
+check "a package detail lists its components" "$(echo "$PKG_COMPONENTS" | grep -q 'kind' && echo true || echo false)"
+# The headline price is derived at read time on purpose, so it must NOT be
+# stored on the package — a stored copy is exactly what drifts on reprice.
+PKG_HAS_PRICE=$(curl -fsS "$API/api/v1/products/$PKG_SLUG" | json_field 'o.bundle.basePriceCents')
+check "a package bundle block carries no stored price" "$([ "$PKG_HAS_PRICE" = "null" ] && echo true || echo false)"
+
 TICKET_TYPE_ID=$(echo "$DETAIL" | jget '.ticketTypes.0.id')
 
 head2 "Guest cart"
