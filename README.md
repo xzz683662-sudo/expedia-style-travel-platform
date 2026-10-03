@@ -215,6 +215,23 @@ consumes it, and abandonment or a background sweep releases it. A sweeper runs e
 transfers are all `Product → TicketType`. The booking engine has exactly one code path,
 which is why adding a category doesn't mean adding a subsystem.
 
+**One shape for the spine, category tables for the depth.** `Product → TicketType → OrderItem`
+stays the single transactional path. On top of it, `ProductStay`, `ProductFlight`,
+`ProductSailing` and `ProductVehicle` carry the structure a flat column cannot express — a
+room grid, ordered flight segments, cabin categories, sailing ports. They are 1:1 extensions
+keyed on `productId`, so nothing in the booking path had to change to adopt them.
+
+Inventory carries a `dimensionKey` alongside the existing `timeSlot`, so a hotel can hold
+stock per room type and a cruise per cabin without a new inventory table. Existing rows keep
+`dimensionKey = ""` and behave exactly as before.
+
+`/search` exposes the derived facets — `starRating` and `boardBasis` for hotels, `carrierName`
+and `routeSummary` for flights, `shipName` for cruises — as both response fields and
+CSV filters (`?type=HOTEL_ROOM&stars=4,5`). They are backfilled from the flat columns by
+`seed-category-extensions.ts`, which is idempotent and marks every value it could not derive
+as `null` rather than inventing one. Treat those nulls as "not yet supplied by a feed", not
+as real data.
+
 **Graceful degradation everywhere.** Redis → in-memory; OpenSearch → Postgres; S3 → local
 disk. The platform boots and works with only Postgres running, which keeps onboarding and
 CI honest.
@@ -322,6 +339,9 @@ The support console is deliberately narrower than admin:
 Base URL `/api/v1`. Auth via `Authorization: Bearer <token>`.
 
 **Discovery** — `GET /search`, `/destinations`, `/collections/:slug`
+Category facet filters: `stars`, `carriers`, `ships`, `boardBasis` (comma-separated). Values
+outside the valid range are dropped rather than rejected, so a bad chip value degrades to
+"no filter" instead of a 4xx.
 **Products** — `GET /products/:slug`, `/products/:slug/availability`, `/products/:slug/nearby`
 **Auth** — `POST /auth/register`, `/auth/login`; `GET|PATCH /auth/me`; `POST /auth/travelers`
 **Orders** — `POST /orders`, `GET /orders`, `/orders/:id`, `/orders/lookup`,
@@ -358,7 +378,7 @@ Operations: `GET /health`, `GET /ready` (per-dependency readiness).
 ## Testing
 
 ```bash
-bash scripts/smoke-test.sh    # 55 checks, requires both services running
+bash scripts/smoke-test.sh    # 62 checks, requires both services running
 bash scripts/mobile-check.sh  # 40 checks, responsive layer regression guard
 pnpm typecheck                # strict TS across api + web
 pnpm --filter @easytrip/web build

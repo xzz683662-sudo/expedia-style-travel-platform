@@ -26,6 +26,15 @@ const listSchema = z.object({
   instantConfirm: z.coerce.boolean().optional(),
   freeCancellation: z.coerce.boolean().optional(),
   skipTheLine: z.coerce.boolean().optional(),
+  /**
+   * Phase 0 category facets. CSV lists so a card grid can offer multi-select
+   * ("4 or 5 stars", "any of these carriers") in one request, matching how
+   * `tags` already behaves. Validated and dropped when empty.
+   */
+  stars: z.string().trim().max(60).optional(),
+  carriers: z.string().trim().max(200).optional(),
+  ships: z.string().trim().max(200).optional(),
+  boardBasis: z.string().trim().max(200).optional(),
   tags: z.string().trim().max(400).optional(),
   lat: z.coerce.number().min(-90).max(90).optional(),
   lng: z.coerce.number().min(-180).max(180).optional(),
@@ -50,6 +59,23 @@ function csv(value: string | undefined, allowed?: readonly string[]): string[] |
   if (!parts?.length) return undefined;
   const values = allowed ? parts.filter((part) => allowed.includes(part)) : parts;
   return values.length ? values : undefined;
+}
+
+/**
+ * CSV of integers within `[min, max]`.
+ *
+ * Out-of-range and non-numeric entries are dropped rather than rejected: a
+ * storefront that offers "3, 4, 5 stars" chips should not 422 because one chip
+ * carried a stray value, and it should not silently widen the filter either.
+ * Deduplicated so `?stars=4,4,5` produces one index round-trip per value.
+ */
+function csvNumberList(value: string | undefined, min: number, max: number): number[] | undefined {
+  const parsed = (value ?? '')
+    .split(',')
+    .map((part) => Number.parseInt(part.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n >= min && n <= max);
+  const unique = [...new Set(parsed)];
+  return unique.length ? unique : undefined;
 }
 
 /**
@@ -81,6 +107,12 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
       instantConfirmOnly: params.instantConfirm,
       freeCancellationOnly: params.freeCancellation,
       skipTheLineOnly: params.skipTheLine,
+      // `stars` is numeric and bounded; a bad value yields undefined rather than
+      // a 500 or a filter that silently matches nothing the user can see.
+      starRatingIn: csvNumberList(params.stars, 1, 5),
+      carrierNameIn: csv(params.carriers),
+      shipNameIn: csv(params.ships),
+      boardBasisIn: csv(params.boardBasis),
       tags: csv(params.tags),
       latitude: params.lat,
       longitude: params.lng,

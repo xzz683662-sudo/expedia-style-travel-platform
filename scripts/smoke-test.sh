@@ -90,6 +90,40 @@ check "search returns a product slug" "$([ -n "$FIRST_SLUG" ] && [ "$FIRST_SLUG"
 PRICE=$(echo "$SEARCH" | jget '.items.0.priceCents')
 check "search hit carries a price (${PRICE:-none} cents)" "$([ -n "$PRICE" ] && [ "$PRICE" != "null" ] && [ "$PRICE" -gt 0 ] 2>/dev/null && echo true || echo false)"
 
+head2 "Category facets (Phase 0)"
+# A hotel card needs stars, a flight card needs carrier + route, a cruise card
+# needs the ship. These assert the facet is exposed AND that it filters, because
+# a facet that renders but does not narrow the result set is worse than none.
+FLIGHT_FACET=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=1")
+FLIGHT_CARRIER=$(echo "$FLIGHT_FACET" | jget '.items.0.carrierName')
+check "a flight hit carries a carrier (${FLIGHT_CARRIER:-none})" "$([ -n "$FLIGHT_CARRIER" ] && [ "$FLIGHT_CARRIER" != "null" ] && echo true || echo false)"
+
+FLIGHT_ROUTE=$(echo "$FLIGHT_FACET" | jget '.items.0.routeSummary')
+check "a flight hit carries a route (${FLIGHT_ROUTE:-none})" "$([ -n "$FLIGHT_ROUTE" ] && [ "$FLIGHT_ROUTE" != "null" ] && echo true || echo false)"
+
+HOTEL_FACET=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1")
+HOTEL_STARS=$(echo "$HOTEL_FACET" | jget '.items.0.starRating')
+check "a hotel hit carries a star rating (${HOTEL_STARS:-none})" "$([ -n "$HOTEL_STARS" ] && [ "$HOTEL_STARS" != "null" ] && echo true || echo false)"
+
+# Facets must not bleed across categories: a hotel must not report a carrier.
+HOTEL_HAS_CARRIER=$(echo "$HOTEL_FACET" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).items[0].carrierName!=null)}catch{console.log(false)}});")
+check "a hotel hit does not leak a carrier facet" "$([ "$HOTEL_HAS_CARRIER" = "false" ] && echo true || echo false)"
+
+STARS_5=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&stars=5&limit=1")
+STARS_5_COUNT=$(echo "$STARS_5" | jget '.total')
+STARS_ALL=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1")
+STARS_ALL_COUNT=$(echo "$STARS_ALL" | jget '.total')
+check "starRating facet narrows results (${STARS_5_COUNT:-0} of ${STARS_ALL_COUNT:-0})" "$([ "${STARS_5_COUNT:-0}" -gt 0 ] 2>/dev/null && [ "${STARS_5_COUNT:-0}" -lt "${STARS_ALL_COUNT:-0}" ] 2>/dev/null && echo true || echo false)"
+
+# Out-of-range and junk values are dropped, not rejected: the storefront should
+# never 422 because one chip carried a bad value.
+BAD_STARS_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/search?type=HOTEL_ROOM&stars=99")
+check "an out-of-range star filter is ignored, not a 422 (${BAD_STARS_CODE})" "$([ "$BAD_STARS_CODE" = "200" ] && echo true || echo false)"
+
+MIXED_STARS=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&stars=5,abc&limit=1")
+MIXED_COUNT=$(echo "$MIXED_STARS" | jget '.total')
+check "a junk entry is dropped and the valid one still applies (${MIXED_COUNT})" "$([ "${MIXED_COUNT:-0}" = "${STARS_5_COUNT:-x}" ] && echo true || echo false)"
+
 head2 "Unified multi-category search"
 # Each metric is resolved by a node call that reads the response file directly.
 # NOTE: do NOT name the category-count variable `GROUPS` — bash exposes `GROUPS`
