@@ -321,6 +321,38 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
         </div>
 
         {/* ---------------------------------------------------------------- */}
+        {/* Synthetic flight data disclosure                              */}
+        {/* ---------------------------------------------------------------- */}
+        {/*
+          A flight whose schedule and fare came from this repo's seed is not a
+          ticket anybody can fly. Selling it as one is the worst kind of bug —
+          it looks like a working feature — so the notice sits directly above
+          the booking panel, where the customer is about to choose a date and
+          pay, not buried in a footer.
+
+          Renders only when the API says `requiresDisclosure`, which defaults on
+          for `FLIGHT_DATA_ORIGIN=SEED`. Configuring a real GDS/NDC feed turns
+          it off; there is no way to hide it while still serving seed data.
+        */}
+        {product.type === 'FLIGHT' && product.flight?.requiresDisclosure && (
+          <div
+            role="note"
+            className="card"
+            style={{
+              gridColumn: '1 / -1',
+              marginBottom: 'var(--sp-4)',
+              borderLeft: '3px solid var(--cl-warn, #b8860b)',
+              padding: 'var(--sp-4)',
+            }}
+          >
+            <div className="bold small">{t('product.syntheticFlightTitle')}</div>
+            <p className="tiny subtle" style={{ marginTop: 4, marginBottom: 0 }}>
+              {t('product.syntheticFlightBody')}
+            </p>
+          </div>
+        )}
+
+        {/* ---------------------------------------------------------------- */}
         {/* Sticky booking panel                                            */}
         {/* ---------------------------------------------------------------- */}
         <div className="with-rail-side with-rail-side-wide booking-panel-col">

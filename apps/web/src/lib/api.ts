@@ -269,6 +269,23 @@ export type ProductDetail = {
     ratingCount: number;
     badge: string | null;
   }[];
+  /**
+   * Flight depth, present only for `FLIGHT`.
+   *
+   * `dataOrigin` / `requiresDisclosure` decide whether the storefront must tell
+   * the customer the schedule and fare are synthetic. `SEED` means this repo
+   * wrote them, not an airline — see `config.flights` on the API and
+   * `docs/supply-sources.md`.
+   */
+  flight?: {
+    marketingCarrier: string;
+    marketingCarrierCode: string | null;
+    operatingCarrier: string | null;
+    alliance: string | null;
+    segmentCount: number;
+    dataOrigin: string;
+    requiresDisclosure: boolean;
+  } | null;
 };
 
 export type AvailabilityDay = {

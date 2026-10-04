@@ -226,6 +226,17 @@ const en = {
     operatedBy: 'Operated by',
     country: 'Country',
     newListing: 'New listing',
+    /**
+     * Shown above the booking panel when `FLIGHT_DATA_ORIGIN=SEED`.
+     *
+     * Deliberately specific. "Demo data" invites a customer to assume the
+     * route is real but the price is illustrative; it is the other way round.
+     * The schedule and the fare are both written by this repository, and no
+     * aircraft flies it.
+     */
+    syntheticFlightTitle: 'Demonstration schedule — not a bookable flight',
+    syntheticFlightBody:
+      'This route, its times and its fare are sample data generated for development. They are not supplied by an airline and cannot be flown or ticketed. Real flight data requires a GDS or NDC feed.',
     hoursCount: (n: number) => `${n} hours`,
     daysCount: (n: number) => `${n} days`,
     hoursShort: (n: number) => `${n}h`,
@@ -939,6 +950,9 @@ const zh = {
     operatedBy: '供应商',
     country: '国家/地区',
     newListing: '新上线',
+    syntheticFlightTitle: '演示航班数据 — 不可真实预订',
+    syntheticFlightBody:
+      '该航线、航班时刻与票价均为开发用途的示例数据，并非航空公司提供，无法实际乘坐或出票。真实航班数据需接入 GDS 或 NDC 数据源。',
     hoursCount: (n: number) => `${n} 小时`,
     daysCount: (n: number) => `${n} 天`,
     hoursShort: (n: number) => `${n} 小时`,

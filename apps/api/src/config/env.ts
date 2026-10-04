@@ -76,6 +76,32 @@ export const config = {
     localDir: str('LOCAL_STORAGE_DIR', resolve(__dirname, '../../storage')),
   },
 
+  /**
+   * Where the flight catalogue's schedule and fare data comes from.
+   *
+   * This is a correctness switch, not a feature flag. Flight schedules, fares
+   * and seat inventory are regulated commercial assets that airlines distribute
+   * through GDS/NDC partners; without such a contract they cannot be obtained
+   * from open data at all. Everything in `apps/api/prisma/seed-*.ts` is
+   * therefore **synthetic** — written by this repo, not by any airline.
+   *
+   * `FLIGHT_DATA_ORIGIN=SEED` makes the API say so on every flight payload, and
+   * the storefront renders a notice from it. Selling that data to a customer as
+   * a real ticket is not a display bug; it is selling something that does not
+   * exist, so the default is to disclose and the only way to stop disclosing is
+   * to configure a real feed.
+   */
+  flights: {
+    /** `SEED` (default) | `GDS` | `NDC` — see docs/supply-sources.md. */
+    origin: str('FLIGHT_DATA_ORIGIN', 'SEED'),
+    /**
+     * Show the synthetic-data notice to customers. Defaults on whenever the
+     * origin is `SEED`, so it cannot be forgotten; set `FLIGHT_DISCLOSE=false`
+     * only alongside a real feed.
+     */
+    disclose: str('FLIGHT_DISCLOSE', str('FLIGHT_DATA_ORIGIN', 'SEED') === 'SEED' ? 'true' : 'false') === 'true',
+  },
+
   payments: {
     provider: str('PAYMENT_PROVIDER', 'mock'),
     baseUrl: str('HYPERSWITCH_BASE_URL'),

@@ -743,6 +743,32 @@ TIGHT=$(curl -fsS "$API/api/v1/search/connections?airport=$CONN_AIRPORT&requireC
 TIGHT_TOTAL=$(echo "$TIGHT" | json_field 'o.total')
 check "an impossible layover cap excludes everything (${TIGHT_TOTAL:-0} of ${CONNECTED_TOTAL:-0})" "$([ "${TIGHT_TOTAL:-0}" -eq 0 ] 2>/dev/null && echo true || echo false)"
 
+head2 "Synthetic flight data disclosure"
+# Flight schedules, fares and seat inventory are regulated commercial assets
+# that airlines only distribute through GDS/NDC partners. Without such a
+# contract they cannot be obtained from open data at all, so everything in the
+# flight catalogue is written by this repo.
+#
+# That makes it unsellable as a real ticket, and the only thing standing
+# between a demo and a misrepresentation is this disclosure. These assert it
+# exists, that it is on by default, and that it is scoped to flights.
+FLIGHT_SLUG=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=1" | jget '.items.0.slug')
+FLIGHT_DETAIL=$(curl -fsS "$API/api/v1/products/$FLIGHT_SLUG")
+FLIGHT_ORIGIN=$(echo "$FLIGHT_DETAIL" | json_field 'o.flight && o.flight.dataOrigin')
+FLIGHT_DISCLOSE=$(echo "$FLIGHT_DETAIL" | json_field 'o.flight && o.flight.requiresDisclosure')
+check "a flight states where its data came from (${FLIGHT_ORIGIN:-none})" "$([ -n "$FLIGHT_ORIGIN" ] && [ "$FLIGHT_ORIGIN" != "null" ] && echo true || echo false)"
+check "a flight requires disclosure when its data is synthetic ($FLIGHT_DISCLOSE)" "$([ "$FLIGHT_DISCLOSE" = "true" ] && echo true || echo false)"
+
+# The disclosure must be impossible to switch off while still serving seed
+# data: `config.flights.disclose` derives from `FLIGHT_DATA_ORIGIN`, so it can
+# only be false when the origin is a real feed.
+check "disclosure is derived from the origin, not a free toggle" "$([ "$FLIGHT_ORIGIN" = "SEED" ] && [ "$FLIGHT_DISCLOSE" = "true" ] && echo true || echo false)"
+
+# A hotel has no such problem and must not be labelled as demo data.
+HOTEL_SLUG=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1" | jget '.items.0.slug')
+HOTEL_FLIGHT=$(curl -fsS "$API/api/v1/products/$HOTEL_SLUG" | json_field 'o.flight')
+check "a hotel carries no synthetic-flight flag" "$([ "$HOTEL_FLIGHT" = "null" ] && echo true || echo false)"
+
 head2 "Supply source (imported airports)"
 # The airport directory is imported from OurAirports (public domain) by
 # `pnpm --filter @easytrip/api supply:import`. These assert the import actually
