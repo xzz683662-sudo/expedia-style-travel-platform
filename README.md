@@ -122,6 +122,7 @@ pnpm dev:api                 # Fastify on :4000
 pnpm dev:web                 # Next.js on :3000
 pnpm smoke                   # end-to-end API test suite
 pnpm audit:schema            # find columns written but never read
+pnpm supply:import          # import airports from open data (~4,000)
 pnpm typecheck               # both packages
 ```
 
@@ -365,7 +366,8 @@ The support console is deliberately narrower than admin:
 Base URL `/api/v1`. Auth via `Authorization: Bearer <token>`.
 
 **Discovery** — `GET /search`, `/destinations`, `/collections/:slug`,
-`/search/connections`, `/search/connections/points`
+`/search/connections`, `/search/connections/points`,
+`/search/airports`, `/search/airports/:iata/source`
 Category facet filters: `stars`, `carriers`, `carrierCodes`, `ships`,
 `destinationPorts`, `boardBasis` (comma-separated). Values
 outside the valid range are dropped rather than rejected, so a bad chip value degrades to
@@ -378,6 +380,13 @@ stop at DXB" from the `FlightSegment` table, with optional `minLayoverMinutes`
 as a connection. `/search/connections/points` summarises every intermediate
 airport the catalogue actually routes through, with the median layover. It is
 empty rather than fabricated when no product has a second leg.
+
+`/search/airports` serves the airport directory imported from open data
+(`pnpm supply:import`, ~4,000 airports with IATA/ICAO codes and coordinates).
+`near=lat,lng&radiusKm=N` ranks by real great-circle distance.
+`/search/airports/:iata/source` returns the provenance and licence of an
+imported row, so attribution is answerable from the data. See
+[`docs/supply-sources.md`](./docs/supply-sources.md).
 **Products** — `GET /products/:slug`, `/products/:slug/availability`, `/products/:slug/nearby`
 **Auth** — `POST /auth/register`, `/auth/login`; `GET|PATCH /auth/me`; `POST /auth/travelers`
 **Orders** — `POST /orders`, `GET /orders`, `/orders/:id`, `/orders/lookup`,

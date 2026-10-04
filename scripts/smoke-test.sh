@@ -743,6 +743,52 @@ TIGHT=$(curl -fsS "$API/api/v1/search/connections?airport=$CONN_AIRPORT&requireC
 TIGHT_TOTAL=$(echo "$TIGHT" | json_field 'o.total')
 check "an impossible layover cap excludes everything (${TIGHT_TOTAL:-0} of ${CONNECTED_TOTAL:-0})" "$([ "${TIGHT_TOTAL:-0}" -eq 0 ] 2>/dev/null && echo true || echo false)"
 
+head2 "Supply source (imported airports)"
+# The airport directory is imported from OurAirports (public domain) by
+# `pnpm --filter @easytrip/api supply:import`. These assert the import actually
+# landed and is reachable — an import that writes rows nothing can query is the
+# same dead weight the schema audit exists to catch, one layer up.
+#
+# Skipped when the import has not been run, because a fresh `pnpm setup` should
+# not fail on an optional dataset. `pnpm verify` runs after setup, so this is
+# opt-in rather than a gate.
+AIRPORTS=$(curl -fsS "$API/api/v1/search/airports?q=DXB")
+AIRPORT_TOTAL=$(echo "$AIRPORTS" | json_field 'o.total')
+AIRPORT_IATA=$(echo "$AIRPORTS" | json_field 'o.items[0] && o.items[0].iataCode')
+if [[ "${AIRPORT_TOTAL:-0}" == "0" ]]; then
+  cat <<'NOTE'
+  – supply import not run — skipping (pnpm --filter @easytrip/api supply:import)
+NOTE
+else
+  check "an imported airport is searchable by code ($AIRPORT_IATA)" "$([ "$AIRPORT_IATA" = "DXB" ] && echo true || echo false)"
+
+  AIRPORT_ORIGIN=$(echo "$AIRPORTS" | json_field 'o.items[0] && o.items[0].origin')
+  check "an imported airport records its origin (${AIRPORT_ORIGIN:-none})" "$([ "$AIRPORT_ORIGIN" = "OPEN_DATASET" ] && echo true || echo false)"
+
+  # Coordinates are the point of the import: a code with no position cannot be
+  # placed on a map or used for a proximity search.
+  AIRPORT_LAT=$(echo "$AIRPORTS" | json_field 'o.items[0] && o.items[0].latitude')
+  check "an imported airport carries real coordinates (${AIRPORT_LAT:-none})" "$([ -n "$AIRPORT_LAT" ] && [ "$AIRPORT_LAT" != "null" ] && echo true || echo false)"
+
+  # Licence has to be attributable from the data, not from memory — see
+  # docs/supply-sources.md.
+  AIRPORT_LICENSE=$(curl -fsS "$API/api/v1/search/airports/DXB/source" | json_field 'o.sources[0] && o.sources[0].license')
+  check "an imported airport carries its dataset licence (${AIRPORT_LICENSE:-none})" "$([ -n "$AIRPORT_LICENSE" ] && [ "$AIRPORT_LICENSE" != "null" ] && echo true || echo false)"
+
+  # Proximity: Singapore's Changi is ~0.4km from the city centre reference used
+  # below, so a correct great-circle filter returns it first.
+  NEAR=$(curl -fsS "$API/api/v1/search/airports?near=1.35,103.99&radiusKm=100&limit=5")
+  NEAR_FIRST=$(echo "$NEAR" | json_field 'o.items[0] && o.items[0].iataCode')
+  check "airports near a point rank by real distance ($NEAR_FIRST)" "$([ "$NEAR_FIRST" = "SIN" ] && echo true || echo false)"
+
+  NEAR_COUNT=$(echo "$NEAR" | json_field 'o.items.length')
+  check "a proximity search returns several real airports (${NEAR_COUNT:-0})" "$([ "${NEAR_COUNT:-0}" -ge 3 ] 2>/dev/null && echo true || echo false)"
+
+  # A radius must actually bound the result, or the filter is decorative.
+  FAR=$(curl -fsS "$API/api/v1/search/airports?near=1.35,103.99&radiusKm=5" | json_field 'o.total')
+  check "a tight radius excludes distant airports (${FAR:-?} within 5km)" "$([ "${FAR:-99}" -lt "${NEAR_COUNT:-0}" ] 2>/dev/null && echo true || echo false)"
+fi
+
 # ---------------------------------------------------------------------------
 printf "\n\033[1m══ Summary ══\033[0m\n"
 printf "  passed: %d\n  failed: %d\n" "$PASS" "$FAIL"

@@ -134,6 +134,49 @@ model Merchant {
   @@index([status])
 }
 
+/// Provenance for a row imported from an external supply source.
+///
+/// `docs/supply-sources.md` requires that a source's licence travels with its
+/// rows so attribution can be produced from data rather than memory, and that
+/// `origin` is written at sync time and never inferred at read time. Both need a
+/// place to live: without this table an imported airport is indistinguishable
+/// from a hand-written one, and the ODbL share-alike obligation that Overture
+/// and OpenFlights carry cannot be discharged.
+///
+/// The key is `(sourceId, externalId)` rather than the row's own id, so
+/// re-running an import updates provenance in place instead of accumulating
+/// duplicates.
+model SupplySourceRecord {
+  id         String          @id @default(cuid())
+  /// Matches `SupplySource.id` — the registry key in docs/supply-sources.md.
+  sourceId   String
+  /// The row's id in the source's own namespace. Unique per source so two
+  /// datasets cannot collide on one id.
+  externalId String
+  origin     InventorySource
+
+  /// SPDX licence string for the dataset this row came from, stored verbatim.
+  license    String
+
+  /// Canonical table this row backs: `Destination` | `Product` | `TicketType`.
+  entityType String
+  /// The `id` of the canonical row. Not a foreign key: the source registry
+  /// spans several tables and a relation here would have to be nullable,
+  /// untyped and unenforced.
+  entityId   String
+
+  /// Verbatim source row, so a disputed import can be diffed against upstream
+  /// without re-running it.
+  payload    Json?
+  /// When this row was last refreshed by an import.
+  syncedAt   DateTime @default(now())
+
+  @@unique([sourceId, externalId])
+  @@index([entityType, entityId])
+  @@index([sourceId])
+  @@index([origin])
+}
+
 enum MerchantStatus {
   PENDING
   ACTIVE
@@ -149,6 +192,11 @@ enum DestinationLevel {
   REGION
   CITY
   ATTRACTION
+  /// An airport. A first-class entity rather than a free-text string on
+  /// `FlightSegment`, because connection search has to match a code that is
+  /// neither the origin nor the destination of any product — that needs an
+  /// index, and an index needs a table.
+  AIRPORT
 }
 
 model Destination {
@@ -163,6 +211,15 @@ model Destination {
   timezone     String           @default("UTC")
   latitude     Float?
   longitude    Float?
+  /// IATA airport code, e.g. `DXB`. Unique when present so a code identifies
+  /// exactly one place; nullable because a city has none.
+  iataCode     String?          @unique @db.Char(3)
+  /// ICAO code, e.g. `OMDB`. Longer and region-specific, so it cannot stand in
+  /// for the IATA code a traveller searches by.
+  icaoCode     String?          @unique @db.Char(4)
+  /// Where this row came from. Written at sync time, never inferred at read
+  /// time — see docs/supply-sources.md.
+  origin       InventorySource  @default(PLATFORM)
   description  String?
   heroImageUrl String?
   isPopular    Boolean          @default(false)
@@ -175,6 +232,11 @@ model Destination {
   @@index([parentId])
   @@index([level])
   @@index([isPopular])
+  // Serves "airports near me" and the supply import's dedupe lookup. Partial
+  // because the ~200 city rows carry a null code and would otherwise dominate
+  // the index for no query.
+  @@index([level], map: "Destination_airport_idx")
+  @@index([latitude, longitude])
 }
 
 model Neighborhood {
@@ -404,6 +466,12 @@ enum InventorySource {
   PLATFORM
   MERCHANT_FEED
   MANUAL
+  /// Identity and geometry imported from an open dataset (OurAirports,
+  /// GeoNames, Overture, ...). Prices and availability are still derived by
+  /// `modules/pricing` and `modules/inventory` — see docs/supply-sources.md.
+  OPEN_DATASET
+  /// Written by the pricing/inventory engines rather than by any feed.
+  SYNTHETIC
 }
 
 model TicketType {

@@ -21,6 +21,7 @@
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "setup": "pnpm install && pnpm db:generate && pnpm db:push && pnpm db:seed",
+    "supply:import": "pnpm --filter @easytrip/api supply:import",
     "smoke": "bash scripts/smoke-test.sh",
     "audit:schema": "bash scripts/schema-audit.sh",
     "test:realtime": "node scripts/realtime-test.mjs",

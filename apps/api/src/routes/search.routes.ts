@@ -1,4 +1,4 @@
-import { ProductType } from '@prisma/client';
+import { Prisma, ProductType } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config/env';
@@ -309,4 +309,123 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
 
   /** Where itineraries actually change aircraft, for a connection picker. */
   app.get('/search/connections/points', async () => ({ items: await summariseConnectionPoints() }));
+
+  /**
+   * Airport directory, imported from an open dataset — see
+   * `docs/supply-sources.md` and `pnpm --filter @easytrip/api supply:import`.
+   *
+   * The catalogue carries ~4,000 real airports with coordinates and IATA/ICAO
+   * codes. That is what makes `/search/connections` able to answer for an airport
+   * the platform sells no flight to: without it, a connection picker can only
+   * offer hubs already present in the inventory.
+   *
+   * `origin` travels with every row because the dataset's licence has to be
+   * attributable from the data, not from someone's memory of where it came from.
+   */
+  app.get('/search/airports', async (request) => {
+    const params = z
+      .object({
+        q: z.string().trim().max(120).optional(),
+        country: z.string().trim().length(2).toUpperCase().optional(),
+        near: z
+          .string()
+          .trim()
+          .regex(/^-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?$/)
+          .optional(),
+        radiusKm: z.coerce.number().int().min(1).max(500).default(100),
+        limit: z.coerce.number().int().min(1).max(50).default(20),
+      })
+      .parse(request.query);
+
+    const where: Prisma.DestinationWhereInput = {
+      level: 'AIRPORT',
+      iataCode: { not: null },
+    };
+
+    if (params.country) where.countryCode = params.country;
+    if (params.q) {
+      // Matches the code or the name. `contains` is case-insensitive on Postgres
+      // for ASCII, which covers every airport name in this dataset.
+      where.OR = [{ iataCode: { contains: params.q.toUpperCase() } }, { name: { contains: params.q } }];
+    }
+
+    if (params.near) {
+      const [lat, lng] = params.near.split(',').map(Number) as [number, number];
+      // Bounding box first, then an exact great-circle filter. The box uses the
+      // `latitude`/`longitude` index; the circle is what actually answers
+      // "within N km", and a box alone would return a square.
+      const latDelta = params.radiusKm / 111.32;
+      const lngDelta = params.radiusKm / (111.32 * Math.max(0.01, Math.cos((lat * Math.PI) / 180)));
+      where.latitude = { gte: lat - latDelta, lte: lat + latDelta };
+      where.longitude = { gte: lng - lngDelta, lte: lng + lngDelta };
+    }
+
+    const rows = await prisma.destination.findMany({
+      where,
+      select: {
+        slug: true,
+        name: true,
+        iataCode: true,
+        icaoCode: true,
+        countryCode: true,
+        latitude: true,
+        longitude: true,
+        origin: true,
+      },
+      orderBy: [{ iataCode: 'asc' }],
+      take: params.limit,
+    });
+
+    let items = rows.map((row) => ({
+      ...row,
+      distanceKm:
+        params.near && row.latitude !== null && row.longitude !== null
+          ? haversineKm(
+              Number(params.near.split(',')[0]),
+              Number(params.near.split(',')[1]),
+              row.latitude,
+              row.longitude,
+            )
+          : null,
+    }));
+
+    if (params.near) {
+      items = items
+        .filter((row) => row.distanceKm !== null && row.distanceKm <= params.radiusKm)
+        .sort((a, b) => (a.distanceKm ?? 0) - (b.distanceKm ?? 0));
+    }
+
+    return { total: items.length, items };
+  });
+
+  /** Provenance for one imported row: which dataset, under which licence. */
+  app.get('/search/airports/:iata/source', async (request) => {
+    const { iata } = z
+      .object({ iata: z.string().trim().length(3).toUpperCase() })
+      .parse(request.params);
+
+    const airport = await prisma.destination.findUnique({
+      where: { iataCode: iata },
+      select: { id: true, name: true, iataCode: true, origin: true },
+    });
+    if (!airport) throw AppError.notFound('Airport');
+
+    const records = await prisma.supplySourceRecord.findMany({
+      where: { entityType: 'Destination', entityId: airport.id },
+      select: { sourceId: true, externalId: true, license: true, syncedAt: true, origin: true },
+      orderBy: { syncedAt: 'desc' },
+    });
+
+    return { airport, sources: records };
+  });
+}
+
+/** Great-circle distance in km. Used only for ranking, so precision is ample. */
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
