@@ -62,14 +62,36 @@ function pick(meta: { en: string; zh: string } | undefined, locale: LocaleCode):
  * own content: a flight leads with the route, a hotel with its star rating, a
  * cruise with the ship and its length in nights.
  */
+/**
+ * True when a route names an intermediate airport.
+ *
+ * The separator is matched loosely (`→`, `->`, `➜`) because the seeds write it
+ * and a supplier feed may write another; what matters is counting airports, not
+ * matching one glyph. A two-airport route is a direct hop by definition.
+ */
+function hasStop(route: string): boolean {
+  return route.split(/\s*(?:→|->|➜)\s*/).filter(Boolean).length > 2;
+}
+
 function categoryFacts(hit: SearchHit, locale: LocaleCode): string[] {
   const zh = locale === 'zh';
   const c = hit.category;
   if (!c) return [];
 
   switch (hit.type) {
-    case 'FLIGHT':
-      return [c.flightRoute, c.airlineName, c.cabinClass].filter((v): v is string => Boolean(v));
+    case 'FLIGHT': {
+      const facts: string[] = [];
+      // Say so when the journey stops. A route written "SIN → DXB → JFK" is a
+      // one-stop itinerary, and a traveller reading only the airports would
+      // otherwise assume it is direct — which changes both the total travel
+      // time and the connection risk they are buying.
+      if (c.flightRoute && hasStop(c.flightRoute)) {
+        facts.push(zh ? '经停' : '1 stop');
+      }
+      return [...facts, c.flightRoute, c.airlineName, c.cabinClass].filter(
+        (v): v is string => Boolean(v),
+      );
+    }
 
     case 'HOTEL_ROOM':
       return [

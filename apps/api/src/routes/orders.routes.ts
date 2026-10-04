@@ -99,7 +99,21 @@ export async function orderRoutes(app: FastifyInstance): Promise<void> {
         skip: (page - 1) * pageSize,
         take: pageSize,
         include: {
-          items: { select: { productName: true, productSlug: true, thumbnailUrl: true, serviceDate: true, quantity: true, timeSlot: true } },
+          items: {
+            select: {
+              productName: true,
+              productSlug: true,
+              thumbnailUrl: true,
+              serviceDate: true,
+              quantity: true,
+              timeSlot: true,
+              // Stay lines need their range in the list view too, otherwise
+              // "My bookings" shows one ambiguous date for a multi-night stay.
+              checkInDate: true,
+              checkOutDate: true,
+              nights: true,
+            },
+          },
           tickets: { select: { id: true, ticketNumber: true, status: true } },
         },
       }),
@@ -289,6 +303,15 @@ function serializeOrder(order: any) {
       ticketTypeName: item.ticketTypeName,
       serviceDate: item.serviceDate,
       timeSlot: item.timeSlot,
+      // Stay snapshot. Null on single-date lines. Without these the order page
+      // cannot render "3 nights, 2 Nov – 5 Nov" — the data is on the row but a
+      // guest booking three nights would see a single date and no indication of
+      // when they actually leave.
+      checkInDate: item.checkInDate,
+      checkOutDate: item.checkOutDate,
+      nights: item.nights,
+      roomTypeCode: item.roomTypeCode,
+      nightlyPriceCents: item.nightlyPriceCents,
       quantity: item.quantity,
       unitPriceCents: item.unitPriceCents,
       lineTotalCents: item.lineTotalCents,

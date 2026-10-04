@@ -30,6 +30,16 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
         destination: { include: { parent: true } },
         merchant: { select: { id: true, name: true, slug: true, ratingAvg: true, ratingCount: true } },
         cancellationPolicy: true,
+        // Category extensions (Phase 0). Included so the detail response can
+        // carry them — without this the room grid, stay policies, flight
+        // segments and sailing ports are all written to the database and never
+        // reach a guest. Same "writer without a reader" shape as the search
+        // facets. Optional, so a non-stay product simply gets nulls.
+        stay: true,
+        flight: true,
+        sailing: true,
+        vehicle: true,
+        bundle: { include: { components: { orderBy: { position: 'asc' } } } },
         ticketTypes: {
           where: { active: true },
           orderBy: [{ position: 'asc' }, { basePriceCents: 'asc' }],
@@ -231,6 +241,90 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
             tiers: product.cancellationPolicy.tiers,
             adminFeeCents: product.cancellationPolicy.adminFeeCents,
             description: product.cancellationPolicy.description,
+          }
+        : null,
+
+      /**
+       * Category depth. Exactly one of these is non-null, decided by the
+       * product's type rather than by which extension row happens to exist —
+       * a hotel with no backfilled `stay` row should read as "unknown", not as
+       * a ticket with missing fields.
+       *
+       * The `Json` columns are passed through as parsed values. They are
+       * written only by the backfill and the seed, so they are trusted; but
+       * every numeric bound inside `policies` may legitimately be `null` ("not
+       * supplied by a feed"), which is why the client must treat absent and
+       * zero as different things.
+       */
+      stay: product.stay
+        ? {
+            propertyType: product.stay.propertyType,
+            starRating: product.stay.starRating,
+            brand: product.stay.brand,
+            checkInTime: product.stay.checkInTime,
+            checkOutTime: product.stay.checkOutTime,
+            roomTypes: product.stay.roomTypes,
+            policies: product.stay.policies,
+            roomTypeTranslations: product.stay.roomTypeTranslations,
+          }
+        : null,
+      flight: product.flight
+        ? {
+            marketingCarrier: product.flight.marketingCarrier,
+            marketingCarrierCode: product.flight.marketingCarrierCode,
+            operatingCarrier: product.flight.operatingCarrier,
+            alliance: product.flight.alliance,
+            segmentCount: product.flight.segmentCount,
+            segments: product.flight.segments,
+            cabins: product.flight.cabins,
+            fareFamilies: product.flight.fareFamilies,
+            ticketingRules: product.flight.ticketingRules,
+          }
+        : null,
+      sailing: product.sailing
+        ? {
+            shipName: product.sailing.shipName,
+            lineName: product.sailing.lineName,
+            lineCode: product.sailing.lineCode,
+            shipCode: product.sailing.shipCode,
+            // A sailing is a departure, not a date range: `nights` plus the two
+            // ports is what makes "which ship, when, from where, for how long"
+            // answerable without a lookup.
+            sailDate: product.sailing.sailDate,
+            nights: product.sailing.nights,
+            embarkationPort: product.sailing.embarkationPort,
+            returnPort: product.sailing.returnPort,
+            embarkationClosesAt: product.sailing.embarkationClosesAt,
+            ports: product.sailing.ports,
+            cabinCategories: product.sailing.cabinCategories,
+            inclusions: product.sailing.inclusions,
+          }
+        : null,
+      vehicle: product.vehicle
+        ? {
+            serviceKind: product.vehicle.serviceKind,
+            vehicleClasses: product.vehicle.vehicleClasses,
+            transferOptions: product.vehicle.transferOptions,
+            rentalPolicy: product.vehicle.rentalPolicy,
+            supplyPolicy: product.vehicle.supplyPolicy,
+          }
+        : null,
+      /**
+       * What a package is made of. The headline price is deliberately absent —
+       * it is derived from the components at read time so it cannot drift when a
+       * component reprices.
+       */
+      bundle: product.bundle
+        ? {
+            components: product.bundle.components.map((component) => ({
+              kind: component.kind,
+              label: component.label,
+              position: component.position,
+              required: component.required,
+              startOffsetDays: component.startOffsetDays,
+              stayNights: component.stayNights,
+              quantity: component.quantity,
+            })),
           }
         : null,
       selectedDate: selectedDate.toISOString().slice(0, 10),

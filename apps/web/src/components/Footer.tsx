@@ -16,6 +16,7 @@ const GROUPS = [
     titleKey: 'nav.experiences' as const,
     items: [
       { key: 'nav.experiences' as const, href: '/search' },
+      { key: 'nav.cart' as const, href: '/cart' },
       { key: 'nav.trending' as const, href: '/collections/trending' },
       { key: 'home.skipTheLine' as const, href: '/collections/skip-the-line' },
       { key: 'nav.freeCancellation' as const, href: '/collections/free-cancellation' },
@@ -56,11 +57,6 @@ export function Footer({ locale }: { locale: LocaleCode }) {
               </span>
             </div>
             <p style={{ maxWidth: 340 }}>{t('footer.aboutText')}</p>
-            <p className="tiny subtle">
-              {locale === 'zh'
-                ? '演示环境：支付走内置模拟网关，不会产生真实扣款。'
-                : 'Demo platform. Payments run against a built-in mock gateway — no real charges are made.'}
-            </p>
           </div>
 
           {GROUPS.map((group) => (

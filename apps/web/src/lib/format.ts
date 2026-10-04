@@ -45,6 +45,20 @@ export function formatDate(date: string | Date, locale: LocaleCode | string = 'e
   }).format(value);
 }
 
+/**
+ * `YYYY-MM-DD` shifted by whole days.
+ *
+ * Works in UTC on purpose. `new Date('2026-11-02')` parses as UTC midnight, but
+ * `toISOString()` on a *local* midnight in a negative-offset zone lands on the
+ * previous day — which would hand a guest a check-in one day earlier than the
+ * one they picked. Same reasoning as `api/src/utils/date.ts`.
+ */
+export function addDaysIso(iso: string, days: number): string {
+  const base = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(base.getTime())) return iso;
+  return new Date(base.getTime() + days * 86_400_000).toISOString().slice(0, 10);
+}
+
 export function formatDateTime(date: string | Date, locale: LocaleCode | string = 'en'): string {
   const value = typeof date === 'string' ? new Date(date) : date;
   if (Number.isNaN(value.getTime())) return '';

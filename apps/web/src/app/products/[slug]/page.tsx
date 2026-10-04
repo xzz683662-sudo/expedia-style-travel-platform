@@ -6,6 +6,7 @@ import { Breadcrumbs, EmptyState, TrustBar } from '@/components/PageShell';
 import { BookingPanel } from '@/components/BookingPanel';
 import { AvailabilityCalendar } from '@/components/AvailabilityCalendar';
 import { ReviewSection } from '@/components/ReviewSection';
+import { SaveToWishlistButton } from '@/components/SaveToWishlistButton';
 import { resolveServerLocale } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 import type { LocaleCode } from '@/lib/i18n/config';
@@ -102,19 +103,22 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
             )}
           </div>
 
-          {product.rating.count > 0 && (
-            <div className="card card-pad center" style={{ minWidth: 130 }}>
-              <div className="rating-stars" style={{ fontSize: 17 }} aria-hidden>
-                {stars(product.rating.average)}
+          <div className="row wrap" style={{ gap: 'var(--sp-3)' }}>
+            <SaveToWishlistButton productId={product.id} serviceDate={selectedDate} locale={locale} />
+            {product.rating.count > 0 && (
+              <div className="card card-pad center" style={{ minWidth: 130 }}>
+                <div className="rating-stars" style={{ fontSize: 17 }} aria-hidden>
+                  {stars(product.rating.average)}
+                </div>
+                <div className="bold" style={{ fontSize: 20 }}>
+                  {product.rating.average.toFixed(1)}
+                </div>
+                <a href="#reviews" className="tiny" style={{ color: 'var(--brand-600)' }}>
+                  {t('product.reviewsCount', product.rating.count)}
+                </a>
               </div>
-              <div className="bold" style={{ fontSize: 20 }}>
-                {product.rating.average.toFixed(1)}
-              </div>
-              <a href="#reviews" className="tiny" style={{ color: 'var(--brand-600)' }}>
-                {t('product.reviewsCount', product.rating.count)}
-              </a>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
 

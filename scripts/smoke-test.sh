@@ -90,6 +90,57 @@ check "search returns a product slug" "$([ -n "$FIRST_SLUG" ] && [ "$FIRST_SLUG"
 PRICE=$(echo "$SEARCH" | jget '.items.0.priceCents')
 check "search hit carries a price (${PRICE:-none} cents)" "$([ -n "$PRICE" ] && [ "$PRICE" != "null" ] && [ "$PRICE" -gt 0 ] 2>/dev/null && echo true || echo false)"
 
+head2 "Category facets (Phase 0)"
+# A hotel card needs stars, a flight card needs carrier + route, a cruise card
+# needs the ship. These assert the facet is exposed AND that it filters, because
+# a facet that renders but does not narrow the result set is worse than none.
+FLIGHT_FACET=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=1")
+FLIGHT_CARRIER=$(echo "$FLIGHT_FACET" | jget '.items.0.carrierName')
+check "a flight hit carries a carrier (${FLIGHT_CARRIER:-none})" "$([ -n "$FLIGHT_CARRIER" ] && [ "$FLIGHT_CARRIER" != "null" ] && echo true || echo false)"
+
+FLIGHT_ROUTE=$(echo "$FLIGHT_FACET" | jget '.items.0.routeSummary')
+check "a flight hit carries a route (${FLIGHT_ROUTE:-none})" "$([ -n "$FLIGHT_ROUTE" ] && [ "$FLIGHT_ROUTE" != "null" ] && echo true || echo false)"
+
+HOTEL_FACET=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1")
+HOTEL_STARS=$(echo "$HOTEL_FACET" | jget '.items.0.starRating')
+check "a hotel hit carries a star rating (${HOTEL_STARS:-none})" "$([ -n "$HOTEL_STARS" ] && [ "$HOTEL_STARS" != "null" ] && echo true || echo false)"
+
+# Facets must not bleed across categories: a hotel must not report a carrier.
+HOTEL_HAS_CARRIER=$(echo "$HOTEL_FACET" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).items[0].carrierName!=null)}catch{console.log(false)}});")
+check "a hotel hit does not leak a carrier facet" "$([ "$HOTEL_HAS_CARRIER" = "false" ] && echo true || echo false)"
+
+STARS_5=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&stars=5&limit=1")
+STARS_5_COUNT=$(echo "$STARS_5" | jget '.total')
+STARS_ALL=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1")
+STARS_ALL_COUNT=$(echo "$STARS_ALL" | jget '.total')
+check "starRating facet narrows results (${STARS_5_COUNT:-0} of ${STARS_ALL_COUNT:-0})" "$([ "${STARS_5_COUNT:-0}" -gt 0 ] 2>/dev/null && [ "${STARS_5_COUNT:-0}" -lt "${STARS_ALL_COUNT:-0}" ] 2>/dev/null && echo true || echo false)"
+
+# carrierCode is stored from an explicit IATA table, not guessed from the carrier
+# name, so a flight must actually carry one. A facet column that is always null
+# indexes nothing and filters nothing while still reading as a feature.
+FLIGHT_TOTAL=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=1" | jget '.total')
+CARRIER_BA=$(curl -fsS "$API/api/v1/search?type=FLIGHT&carrierCodes=BA&limit=1")
+CARRIER_BA_COUNT=$(echo "$CARRIER_BA" | jget '.total')
+CARRIER_BA_FIELD=$(echo "$CARRIER_BA" | jget '.items.0.carrierCode')
+check "flight hit carries a real IATA carrier code (${CARRIER_BA_FIELD:-none})" "$([ -n "$CARRIER_BA_FIELD" ] && [ "$CARRIER_BA_FIELD" != "null" ] && echo true || echo false)"
+check "carrierCode facet narrows flights (${CARRIER_BA_COUNT:-0} of ${FLIGHT_TOTAL:-0})" "$([ "${CARRIER_BA_COUNT:-0}" -gt 0 ] 2>/dev/null && [ "${CARRIER_BA_COUNT:-0}" -lt "${FLIGHT_TOTAL:-0}" ] 2>/dev/null && echo true || echo false)"
+
+CARRIER_NONE=$(curl -fsS "$API/api/v1/search?type=FLIGHT&carrierCodes=ZZ&limit=1" | jget '.total')
+check "an unknown carrier code returns nothing (${CARRIER_NONE:-null})" "$([ "${CARRIER_NONE:-null}" = "0" ] && echo true || echo false)"
+
+PORT_HITS=$(curl -fsS "$API/api/v1/search?type=CRUISE&destinationPorts=London&limit=1")
+PORT_COUNT=$(echo "$PORT_HITS" | jget '.total')
+check "cruise embarkation port facet filters (${PORT_COUNT:-0} hit(s))" "$([ "${PORT_COUNT:-0}" -gt 0 ] 2>/dev/null && echo true || echo false)"
+
+# Out-of-range and junk values are dropped, not rejected: the storefront should
+# never 422 because one chip carried a bad value.
+BAD_STARS_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/search?type=HOTEL_ROOM&stars=99")
+check "an out-of-range star filter is ignored, not a 422 (${BAD_STARS_CODE})" "$([ "$BAD_STARS_CODE" = "200" ] && echo true || echo false)"
+
+MIXED_STARS=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&stars=5,abc&limit=1")
+MIXED_COUNT=$(echo "$MIXED_STARS" | jget '.total')
+check "a junk entry is dropped and the valid one still applies (${MIXED_COUNT})" "$([ "${MIXED_COUNT:-0}" = "${STARS_5_COUNT:-x}" ] && echo true || echo false)"
+
 head2 "Unified multi-category search"
 # Each metric is resolved by a node call that reads the response file directly.
 # NOTE: do NOT name the category-count variable `GROUPS` — bash exposes `GROUPS`
@@ -128,6 +179,7 @@ check "GET /api/v1/collections/trending works" "$(echo "$COLL" | jget '.title' |
 head2 "Product detail"
 DETAIL=$(curl -fsS "$API/api/v1/products/$FIRST_SLUG")
 check "GET /api/v1/products/:slug returns the product" "$(echo "$DETAIL" | jget '.slug' | grep -q "$FIRST_SLUG" && echo true || echo false)"
+PRODUCT_ID=$(echo "$DETAIL" | jget '.id')
 
 VARIANTS=$(echo "$DETAIL" | jget '.ticketTypes' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).length)}catch{console.log(0)}});")
 check "product exposes ticket variants (${VARIANTS:-0})" "$([ "${VARIANTS:-0}" -gt 0 ] && echo true || echo false)"
@@ -135,7 +187,68 @@ check "product exposes ticket variants (${VARIANTS:-0})" "$([ "${VARIANTS:-0}" -
 CANCEL_POLICY=$(echo "$DETAIL" | jget '.cancellationPolicy.freeCancelHours')
 check "product exposes a cancellation policy (${CANCEL_POLICY:-none}h)" "$([ -n "$CANCEL_POLICY" ] && [ "$CANCEL_POLICY" != "null" ] && echo true || echo false)"
 
+head2 "Category depth (Phase 0 extensions)"
+# Every extension table was written by the backfill but, until now, read by
+# nothing — the detail endpoint omitted them entirely, so a hotel page could not
+# show its room grid or its check-in time. These assert the depth is reachable
+# *and* that it stays category-scoped: a hotel must not report a ship.
+json_field() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);const v=$1;console.log(v===null||v===undefined?'null':(typeof v==='object'?JSON.stringify(v):v))}catch{console.log('null')}})"; }
+
+STAY_DETAIL=$(curl -fsS "$API/api/v1/products/$FIRST_SLUG")
+STAY_EXT=$([ "$(echo "$STAY_DETAIL" | json_field 'o.stay')" != "null" ] && echo yes || echo no)
+FLIGHT_EXT=$(echo "$STAY_DETAIL" | json_field 'o.flight')
+SAILING_EXT=$(echo "$STAY_DETAIL" | json_field 'o.sailing')
+if [ "$STAY_EXT" = "yes" ]; then
+  STAY_ROOMS=$(echo "$STAY_DETAIL" | json_field 'o.stay.roomTypes')
+  check "a stay exposes its room grid" "$(echo "$STAY_ROOMS" | grep -q 'code' && echo true || echo false)"
+  STAY_TIMES=$(echo "$STAY_DETAIL" | json_field 'o.stay.checkInTime + "-" + o.stay.checkOutTime')
+  check "a stay exposes check-in and check-out times (${STAY_TIMES:-none})" "$([ -n "$STAY_TIMES" ] && [ "$STAY_TIMES" != "null" ] && echo true || echo false)"
+  check "a stay does not leak a flight or sailing block" "$([ "$FLIGHT_EXT" = "null" ] && [ "$SAILING_EXT" = "null" ] && echo true || echo false)"
+else
+  # `$FIRST_SLUG` is whatever the catalogue search returned first, which is not
+  # guaranteed to be a hotel. Reach for an actual one rather than asserting
+  # nothing.
+  STAY_SLUG=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1" | jget '.items.0.slug')
+  STAY_DETAIL=$(curl -fsS "$API/api/v1/products/$STAY_SLUG")
+  STAY_ROOMS=$(echo "$STAY_DETAIL" | json_field 'o.stay.roomTypes')
+  check "a hotel detail exposes its room grid" "$(echo "$STAY_ROOMS" | grep -q 'code' && echo true || echo false)"
+  check "a hotel detail does not leak a flight block" "$([ "$(echo "$STAY_DETAIL" | json_field 'o.flight')" = "null" ] && echo true || echo false)"
+fi
+
+FLIGHT_SLUG=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=1" | jget '.items.0.slug')
+FLIGHT_DETAIL=$(curl -fsS "$API/api/v1/products/$FLIGHT_SLUG")
+FLIGHT_SEGMENTS=$(echo "$FLIGHT_DETAIL" | json_field 'o.flight.segments')
+check "a flight exposes its segments" "$(echo "$FLIGHT_SEGMENTS" | grep -q 'airport' && echo true || echo false)"
+FLIGHT_CABINS=$(echo "$FLIGHT_DETAIL" | json_field 'o.flight.cabins')
+check "a flight exposes its cabins" "$(echo "$FLIGHT_CABINS" | grep -q 'code' && echo true || echo false)"
+
+CRUISE_SLUG=$(curl -fsS "$API/api/v1/search?type=CRUISE&limit=1" | jget '.items.0.slug')
+CRUISE_SHIP=$(curl -fsS "$API/api/v1/products/$CRUISE_SLUG" | json_field 'o.sailing.shipName')
+check "a cruise exposes its ship (${CRUISE_SHIP:-none})" "$([ -n "$CRUISE_SHIP" ] && [ "$CRUISE_SHIP" != "null" ] && echo true || echo false)"
+
+PKG_SLUG=$(curl -fsS "$API/api/v1/search?type=PACKAGE&limit=1" | jget '.items.0.slug')
+PKG_COMPONENTS=$(curl -fsS "$API/api/v1/products/$PKG_SLUG" | json_field 'o.bundle.components')
+check "a package detail lists its components" "$(echo "$PKG_COMPONENTS" | grep -q 'kind' && echo true || echo false)"
+# The headline price is derived at read time on purpose, so it must NOT be
+# stored on the package — a stored copy is exactly what drifts on reprice.
+PKG_HAS_PRICE=$(curl -fsS "$API/api/v1/products/$PKG_SLUG" | json_field 'o.bundle.basePriceCents')
+check "a package bundle block carries no stored price" "$([ "$PKG_HAS_PRICE" = "null" ] && echo true || echo false)"
+
 TICKET_TYPE_ID=$(echo "$DETAIL" | jget '.ticketTypes.0.id')
+
+head2 "Guest cart"
+GUEST_CART=$(curl -fsS "$API/api/v1/cart")
+GUEST_CART_TOKEN=$(echo "$GUEST_CART" | jget '.guestToken')
+check "GET /cart creates a guest cart capability" "$([ -n "$GUEST_CART_TOKEN" ] && [ "$GUEST_CART_TOKEN" != "null" ] && echo true || echo false)"
+
+GUEST_SERVICE_DATE=$(node -e "const d=new Date();d.setDate(d.getDate()+10);console.log(d.toISOString().slice(0,10));")
+GUEST_CART_ADD=$(curl -fsS -X POST "$API/api/v1/cart/items" \
+  -H 'Content-Type: application/json' \
+  -H "X-Cart-Token: $GUEST_CART_TOKEN" \
+  -d "{\"ticketTypeId\":\"$TICKET_TYPE_ID\",\"serviceDate\":\"$GUEST_SERVICE_DATE\",\"quantity\":1}")
+GUEST_CART_COUNT=$(echo "$GUEST_CART_ADD" | jget '.items' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).length)}catch{console.log(0)}});")
+check "guest can add an item without signing in" "$([ "${GUEST_CART_COUNT:-0}" -eq 1 ] && echo true || echo false)"
+check "adding to cart leaves it open without a stock hold" "$(echo "$GUEST_CART_ADD" | jget '.status' | grep -q '^OPEN$' && echo true || echo false)"
 
 head2 "Availability calendar"
 CAL=$(curl -fsS "$API/api/v1/products/$FIRST_SLUG/availability?days=30")
@@ -158,15 +271,282 @@ LOGIN=$(curl -fsS -X POST "$API/api/v1/auth/login" \
   -d "{\"email\":\"$EMAIL\",\"password\":\"Password123!\"}")
 check "POST /auth/login authenticates" "$(echo "$LOGIN" | jget '.token' | grep -qv 'null' && echo true || echo false)"
 
-head2 "Checkout"
-# Pick a date ~10 days out so inventory exists.
-SERVICE_DATE=$(node -e "const d=new Date();d.setDate(d.getDate()+10);console.log(d.toISOString().slice(0,10));")
+head2 "Wishlist"
+WISHLIST_ADD=$(curl -fsS -X POST "$API/api/v1/wishlist" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"productId\":\"$PRODUCT_ID\"}")
+check "customer can save a product to the wishlist" "$(echo "$WISHLIST_ADD" | jget '.productId' | grep -q "$PRODUCT_ID" && echo true || echo false)"
+WISHLIST=$(curl -fsS "$API/api/v1/wishlist" -H "Authorization: Bearer $TOKEN")
+check "saved product appears in the wishlist" "$(echo "$WISHLIST" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).some(i=>i.productId==='$PRODUCT_ID'))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
+curl -fsS -X DELETE "$API/api/v1/wishlist/$PRODUCT_ID" -H "Authorization: Bearer $TOKEN" >/dev/null
+WISHLIST=$(curl -fsS "$API/api/v1/wishlist" -H "Authorization: Bearer $TOKEN")
+check "customer can remove a saved product" "$(echo "$WISHLIST" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(!JSON.parse(d).some(i=>i.productId==='$PRODUCT_ID'))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
 
-ORDER=$(curl -fsS -X POST "$API/api/v1/orders" \
+head2 "Package bundle"
+BUNDLE_SLUG="london-flight-and-stay"
+BUNDLE_DETAIL=$(curl -fsS "$API/api/v1/products/$BUNDLE_SLUG")
+BUNDLE_PID=$(echo "$BUNDLE_DETAIL" | jget '.id')
+# A bundle carries no inventory rows of its own; if search ever starts
+# filtering it out for "no availability" the bundle silently disappears.
+check "a package is bookable without its own inventory ($BUNDLE_SLUG)" "$([ -n "$BUNDLE_PID" ] && [ "$BUNDLE_PID" != "null" ] && echo true || echo false)"
+
+# Pick a date every *actual* component can serve.
+#
+# A date from a generic hotel calendar is the wrong shape of answer:
+# `expandBundle` books one specific flight and one specific room, so a date that
+# some other hotel and some other flight both have free still yields
+# INVENTORY_UNAVAILABLE. The components are not keyed by slug in the detail
+# response, so their calendars are intersected by kind instead — a date is
+# usable only when a FLIGHT and a HOTEL_ROOM both have stock on it.
+BUNDLE_START=$(node -e '
+  const base = process.argv[1];
+  (async () => {
+    // The hotel component holds NIGHTS nights from `serviceDate`, and checkout
+  // The calendar sums availability across ticket types, so `availableQty` is
+  // NOT "this many of the option about to be booked". A hotel with capacities
+  // 18 / 6 / 2 whose cheap type is sold out still totals 26 and reads
+  // AVAILABLE -- then checkout answers INVENTORY_UNAVAILABLE. So consult the
+  // per-ticket-type breakdown for the exact option this test books.
+  //
+  // The hotel component also holds NIGHTS nights from `serviceDate`, and
+  // checkout needs all of them, so a free start date is not enough.
+  const NIGHTS = 3;
+  const shift = (iso, n) => {
+    const d = new Date(iso + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+
+  const hotel = await (await fetch(base + "/api/v1/search?type=HOTEL_ROOM&limit=1")).json();
+  const hotelSlug = hotel.items?.[0]?.slug;
+  if (!hotelSlug) return console.log("");
+  const hotelDetail = await (await fetch(base + "/api/v1/products/" + hotelSlug)).json();
+  const hotelType = hotelDetail.ticketTypes?.[0]?.id;
+  if (!hotelType) return console.log("");
+  const hotelCal = await (await fetch(base + "/api/v1/products/" + hotelSlug + "/availability")).json();
+  const hotelDays = new Map((hotelCal.days ?? []).map((d) => [d.date, d]));
+  const hotelFree = (iso) => {
+    const day = hotelDays.get(iso);
+    if (!day) return false;
+    return ((day.byTicketType ?? []).find((t) => t.ticketTypeId === hotelType)?.available ?? 0) > 0;
+  };
+
+  const flights = await (await fetch(base + "/api/v1/search?type=FLIGHT&limit=20")).json();
+  const flightDates = new Set();
+  for (const f of flights.items ?? []) {
+    try {
+      const cal = await (await fetch(base + "/api/v1/products/" + f.slug + "/availability")).json();
+      for (const d of cal.days ?? []) if (d.status !== "SOLD_OUT" && (d.availableQty ?? 0) > 0) flightDates.add(d.date);
+    } catch {}
+  }
+
+  for (const date of [...flightDates].sort()) {
+    const nights = Array.from({ length: NIGHTS }, (_, i) => shift(date, i));
+    if (nights.every(hotelFree)) { console.log(date); return; }
+  }
+  console.log("");
+})().catch(() => console.log(""));
+' "$API")
+if [[ -z "$BUNDLE_START" ]]; then
+  bad "no date serves both a flight and a hotel for the bundle"
+  BUNDLE_START=$(node -e "const d=new Date();d.setDate(d.getDate()+60);console.log(d.toISOString().slice(0,10));")
+fi
+
+BUNDLE_CART=$(curl -fsS "$API/api/v1/cart" -H "Authorization: Bearer $TOKEN")
+BUNDLE_CART=$(curl -fsS -X POST "$API/api/v1/cart/bundle" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"productId\":\"$BUNDLE_PID\",\"serviceDate\":\"$BUNDLE_START\",\"quantity\":1}")
+BUNDLE_ITEM_COUNT=$(echo "$BUNDLE_CART" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).items.length)}catch{console.log(0)}});")
+check "a bundle expands into several cart lines (${BUNDLE_ITEM_COUNT:-0})" "$([ "${BUNDLE_ITEM_COUNT:-0}" -ge 2 ] 2>/dev/null && echo true || echo false)"
+
+# A flight line stays on one date; the stay line carries its own night count.
+# Getting this wrong books three nights as three separate rooms.
+BUNDLE_HAS_NIGHT=$(echo "$BUNDLE_CART" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).items.some(i=>(i.nights||1)>1))}catch{console.log(false)}});")
+check "the expanded bundle mixes single-date and multi-night lines" "$([ "$BUNDLE_HAS_NIGHT" = "true" ] && echo true || echo false)"
+
+# Report the body on a non-2xx instead of letting `curl -f` abort the suite:
+# `curl: (22) ... 409` names the status but not the product that sold out, which
+# is the only thing worth knowing when this fails.
+#
+# `curl -w '\n[status %{http_code}]'` emits a *literal* backslash-n, not a
+# newline — a `%{stderr}`-style strip on a real newline silently does nothing,
+# leaving the marker glued to the JSON and every `jq` parse downstream failing.
+BUNDLE_CHECKOUT=$(curl -sS -w ' [status %{http_code}]' -X POST "$API/api/v1/cart/checkout" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"contactEmail":"traveler@easytrip.test","travelers":[{"fullName":"Smoke Bundle","dateOfBirth":"1990-01-01"}]}')
+BUNDLE_STATUS="${BUNDLE_CHECKOUT##*\[status }"
+BUNDLE_STATUS="${BUNDLE_STATUS%\]}"
+BUNDLE_CHECKOUT="${BUNDLE_CHECKOUT% [status *}"
+if [[ ! "$BUNDLE_STATUS" == 2* ]]; then
+  red "bundle checkout on ${BUNDLE_START} returned ${BUNDLE_STATUS}: ${BUNDLE_CHECKOUT}"
+  BUNDLE_CHECKOUT=""
+fi
+BUNDLE_ORDER=$(echo "$BUNDLE_CHECKOUT" | jget '.orderId')
+check "a bundle checks out as one order (${BUNDLE_ORDER:-none})" "$([ -n "$BUNDLE_ORDER" ] && [ "$BUNDLE_ORDER" != "null" ] && echo true || echo false)"
+check "the bundle order returns its component lines" "$([ -n "$BUNDLE_ORDER" ] && [ "$BUNDLE_ORDER" != "null" ] && curl -fsS "$API/api/v1/orders/$BUNDLE_ORDER" -H "Authorization: Bearer $TOKEN" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);console.log(o.items.length>=2&&new Set(o.items.map(i=>i.productType)).size>=2)}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
+
+# The order total must be the sum of what the customer was shown, per line.
+BUNDLE_SUM=$(curl -fsS "$API/api/v1/orders/$BUNDLE_ORDER" -H "Authorization: Bearer $TOKEN" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);console.log(o.items.reduce((s,i)=>s+i.lineTotalCents,0))}catch{console.log('')}});")
+BUNDLE_TOTAL=$(echo "$BUNDLE_CHECKOUT" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const o=JSON.parse(d);console.log(o.totalCents ?? o.totalAmountCents ?? o.payment?.totalCents ?? '')}catch{console.log('')}});")
+check "the order total equals the sum of its component lines (${BUNDLE_TOTAL:-0} of ${BUNDLE_SUM:-?})" "$([ -n "$BUNDLE_SUM" ] && [ -n "$BUNDLE_TOTAL" ] && [ "$BUNDLE_TOTAL" = "$BUNDLE_SUM" ] && echo true || echo false)"
+
+head2 "Multi-night stay"
+# A hotel stay is sold per room per night. These assert the three properties
+# that distinguish it from a ticket: nights are billed, every night in the range
+# is held, and a range that cannot be fully satisfied leaves nothing behind.
+# `ticketTypeId` is not on a search hit — the option list comes from the product
+# detail, the same way the single-date checkout above resolves its own.
+STAY_SLUG=$(curl -fsS "$API/api/v1/search?type=HOTEL_ROOM&limit=1" | jget '.items.0.slug')
+STAY_TT=$(curl -fsS "$API/api/v1/products/$STAY_SLUG" | jget '.ticketTypes.0.id')
+
+# Pick a window the calendar says is actually free.
+  #
+  # A fixed offset is not repeatable: every run really does consume the rooms it
+  # books, so after enough runs the suite fails with INVENTORY_UNAVAILABLE on a
+  # date nothing is wrong with. Hour-of-day shuffling only stretches that out
+  # (7 windows, then the same failure). Asking the availability calendar which
+  # nights have stock is the only version of this that survives a second run.
+  STAY_WINDOW=$(node -e '
+    const base = process.argv[1];
+    (async () => {
+      const hits = await (await fetch(base + "/api/v1/search?type=HOTEL_ROOM&limit=1")).json();
+      const slug = hits.items?.[0]?.slug;
+      if (!slug) return console.log("");
+      const detail = await (await fetch(base + "/api/v1/products/" + slug)).json();
+      const tt = detail.ticketTypes?.[0]?.id;
+      if (!tt) return console.log("");
+      const cal = await (await fetch(base + "/api/v1/products/" + slug + "/availability")).json();
+      const days = Array.isArray(cal.days) ? cal.days : [];
+
+
+// `checkIn`..`checkOut` spans NIGHTS *nights*: a 3-night stay is four
+        // consecutive dates. Returning the first and third available dates
+        // yields a 2-night stay, which is why the assertion read 2.
+        //
+        // `availableQty` sums every ticket type, so it is not the number of the
+        // option this test books. A hotel with capacities 18 / 6 / 2 whose cheap
+        // type is sold out still totals 26 and reads AVAILABLE, then checkout
+        // answers INVENTORY_UNAVAILABLE. Consult the per-type breakdown.
+        const NIGHTS = 3;
+        for (let i = 0; i + NIGHTS < days.length; i += 1) {
+          const window = days.slice(i, i + NIGHTS + 1);
+          const bookable = (d) =>
+            ((d.byTicketType ?? []).find((t) => t.ticketTypeId === tt)?.available ?? 0) > 0;
+          if (window.every(bookable)) {
+            return console.log(window[0].date + "," + window[window.length - 1].date + "," + tt);
+          }
+        }
+      console.log("");
+    })().catch(() => console.log(""));
+  ' "$API")
+  STAY_IN=${STAY_WINDOW%%,*}
+  STAY_REST=${STAY_WINDOW#*,}
+  STAY_OUT=${STAY_REST%%,*}
+  STAY_TT=${STAY_REST#*,}
+
+  if [[ -z "$STAY_IN" || "$STAY_IN" == "$STAY_WINDOW" ]]; then
+    bad "no free hotel window available to test a stay"
+  else
+    # `resolveCart` needs an existing open cart; without this the POST below 404s
+  # with "Open cart not found", which is a correct error for a correct reason.
+  curl -fsS "$API/api/v1/cart" -H "Authorization: Bearer $TOKEN" > /dev/null
+  STAY_CART=$(curl -sS -w ' [status %{http_code}]' -X POST "$API/api/v1/cart/items" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"ticketTypeId\":\"$STAY_TT\",\"serviceDate\":\"$STAY_IN\",\"checkOutDate\":\"$STAY_OUT\",\"quantity\":1}")
+  # Surface the body on failure. `curl -f` throws the body away, so a bare "404"
+  # says nothing about *what* was missing, and this block has several requests
+  # that can each be the one.
+  STAY_STATUS="${STAY_CART##*\[status }"
+  STAY_STATUS="${STAY_STATUS%\]}"
+  STAY_CART="${STAY_CART% [status *}"
+  if [[ ! "$STAY_STATUS" == 2* ]]; then
+    red "stay cart on ${STAY_IN}..${STAY_OUT} returned ${STAY_STATUS}: ${STAY_CART}"
+  fi
+  STAY_NIGHTS=$(echo "$STAY_CART" | jget '.items.0.nights' 2>/dev/null || echo "")
+  STAY_UNIT=$(echo "$STAY_CART" | jget '.items.0.unitPriceCents' 2>/dev/null || echo "")
+  STAY_TOTAL=$(echo "$STAY_CART" | jget '.items.0.lineTotalCents' 2>/dev/null || echo "")
+  check "a stay cart line records its nights (${STAY_NIGHTS:-none}, expected 3)" "$([ "$STAY_NIGHTS" = "3" ] && echo true || echo false)"
+
+  # lineTotal must be unit x rooms x nights. Charging the nightly rate once is the
+  # bug this guards: the cart quotes 3 nights and the invoice bills 1.
+  STAY_EXPECTED=$(( ${STAY_UNIT:-0} * 3 ))
+  check "a stay line bills per night (${STAY_TOTAL:-0} of ${STAY_EXPECTED})" "$([ "${STAY_TOTAL:-0}" = "$STAY_EXPECTED" ] && echo true || echo false)"
+
+  STAY_CHECKOUT=$(curl -sS -w ' [status %{http_code}]' -X POST "$API/api/v1/cart/checkout" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"contactEmail\":\"traveler@easytrip.test\",\"travelers\":[{\"fullName\":\"Smoke Stay\",\"dateOfBirth\":\"1990-01-01\"}]}")
+  STAY_STATUS="${STAY_CHECKOUT##*\[status }"
+  STAY_STATUS="${STAY_STATUS%\]}"
+  STAY_CHECKOUT="${STAY_CHECKOUT% [status *}"
+  if [[ ! "$STAY_STATUS" == 2* ]]; then
+    red "stay checkout returned ${STAY_STATUS}: ${STAY_CHECKOUT}"
+  fi
+  STAY_ORDER_ID=$(echo "$STAY_CHECKOUT" | jget '.orderId')
+  check "a multi-night stay checks out (${STAY_ORDER_ID:-none})" "$([ -n "$STAY_ORDER_ID" ] && [ "$STAY_ORDER_ID" != "null" ] && echo true || echo false)"
+
+  # Compare the order against its *own* line, not against the cart figure above:
+  # the two are priced independently (a room's TicketType carries its own
+  # currency and base price), so only the per-night relationship is meaningful.
+  # This is the assertion that catches the real defect — a 3-night booking
+  # invoiced for one night.
+  STAY_ORDER_DETAIL=$(curl -fsS "$API/api/v1/orders/$STAY_ORDER_ID" -H "Authorization: Bearer $TOKEN")
+  STAY_ORDER_NIGHTS=$(echo "$STAY_ORDER_DETAIL" | jget '.items.0.nights')
+  STAY_ORDER_LINE=$(echo "$STAY_ORDER_DETAIL" | jget '.items.0.lineTotalCents')
+  STAY_ORDER_NIGHTLY=$(echo "$STAY_ORDER_DETAIL" | jget '.items.0.unitPriceCents')
+  STAY_ORDER_EXPECTED=$(( ${STAY_ORDER_NIGHTLY:-0} * ${STAY_ORDER_NIGHTS:-0} ))
+  check "the stay order keeps its night count (${STAY_ORDER_NIGHTS:-none})" "$([ "${STAY_ORDER_NIGHTS:-0}" -ge 2 ] 2>/dev/null && echo true || echo false)"
+  check "the stay order bills night x night (${STAY_ORDER_LINE:-0} of ${STAY_ORDER_EXPECTED})" "$([ "${STAY_ORDER_LINE:-0}" = "$STAY_ORDER_EXPECTED" ] && [ "${STAY_ORDER_EXPECTED:-0}" -gt 0 ] && echo true || echo false)"
+fi
+
+head2 "Checkout"
+# Pick a date the calendar says is free, for the same reason as the stay and
+# bundle windows: every run really consumes the seats it books, so a fixed
+# offset eventually books a sold-out date and the suite fails for no reason.
+SERVICE_DATE=$(node -e '
+  const base = process.argv[1];
+  (async () => {
+    const hits = await (await fetch(base + "/api/v1/search?limit=1")).json();
+    const slug = hits.items?.[0]?.slug;
+    if (!slug) return console.log("");
+    const cal = await (await fetch(base + "/api/v1/products/" + slug + "/availability")).json();
+    const days = Array.isArray(cal.days) ? cal.days : [];
+    // Start two days out, not one.
+    //
+    // The cancellation policy is tiered on hours-until-service, and the top tier
+    // needs 72h. Booking tomorrow lands at ~23h, which the policy correctly
+    // refunds at 0% — so the refund assertion below failed on correct
+    // behaviour. The date must clear the free-cancellation window, not merely
+    // have stock.
+    const today = new Date();
+    const soonest = new Date(today.getTime() + 3 * 86_400_000).toISOString().slice(0, 10);
+    const day = days.find((d) => d.date >= soonest && d.status !== "SOLD_OUT" && (d.availableQty ?? 0) > 0);
+    console.log(day ? day.date : "");
+  })().catch(() => console.log(""));
+' "$API")
+if [[ -z "$SERVICE_DATE" ]]; then
+  SERVICE_DATE=$(node -e "const d=new Date();d.setDate(d.getDate()+10);console.log(d.toISOString().slice(0,10));")
+fi
+
+USER_CART=$(curl -fsS "$API/api/v1/cart" -H "Authorization: Bearer $TOKEN")
+check "signed-in customer gets an open cart" "$(echo "$USER_CART" | jget '.status' | grep -q '^OPEN$' && echo true || echo false)"
+for _ in 1 2; do
+  USER_CART=$(curl -fsS -X POST "$API/api/v1/cart/items" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "{\"ticketTypeId\":\"$TICKET_TYPE_ID\",\"serviceDate\":\"$SERVICE_DATE\",\"quantity\":1}")
+done
+USER_CART_COUNT=$(echo "$USER_CART" | jget '.items' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).length)}catch{console.log(0)}});")
+check "cart retains multiple independently selected lines" "$([ "${USER_CART_COUNT:-0}" -eq 2 ] && echo true || echo false)"
+
+ORDER=$(curl -fsS -X POST "$API/api/v1/cart/checkout" \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" \
   -d "{
-    \"lines\":[{\"ticketTypeId\":\"$TICKET_TYPE_ID\",\"serviceDate\":\"$SERVICE_DATE\",\"quantity\":2}],
     \"contactEmail\":\"$EMAIL\",
     \"travelers\":[{\"fullName\":\"Smoke Test\",\"isLead\":true}]
   }")
@@ -174,7 +554,7 @@ ORDER=$(curl -fsS -X POST "$API/api/v1/orders" \
 ORDER_ID=$(echo "$ORDER" | jget '.orderId')
 ORDER_NUM=$(echo "$ORDER" | jget '.orderNumber')
 TOTAL_CENTS=$(echo "$ORDER" | jget '.totalCents')
-check "POST /orders creates a pending order ($ORDER_NUM)" "$([ -n "$ORDER_ID" ] && [ "$ORDER_ID" != "null" ] && echo true || echo false)"
+check "POST /cart/checkout creates a pending multi-line order ($ORDER_NUM)" "$([ -n "$ORDER_ID" ] && [ "$ORDER_ID" != "null" ] && echo true || echo false)"
 check "order total is positive (${TOTAL_CENTS:-0} cents)" "$([ "${TOTAL_CENTS:-0}" -gt 0 ] && echo true || echo false)"
 
 head2 "Inventory hold"
@@ -206,6 +586,22 @@ check "POST /orders/:id/pay captures payment (status=$PAY_STATUS)" "$(echo "$PAY
 DETAIL2=$(curl -fsS "$API/api/v1/orders/$ORDER_ID" -H "Authorization: Bearer $TOKEN")
 ORDER_STATUS=$(echo "$DETAIL2" | jget '.status')
 check "order transitions to CONFIRMED (${ORDER_STATUS:-none})" "$(echo "$ORDER_STATUS" | grep -q 'CONFIRMED' && echo true || echo false)"
+ORDER_LINE_COUNT=$(echo "$DETAIL2" | jget '.items' | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).length)}catch{console.log(0)}});")
+check "multi-line cart becomes one order with two lines" "$([ "${ORDER_LINE_COUNT:-0}" -eq 2 ] && echo true || echo false)"
+
+head2 "Customer itinerary"
+ITINERARY=$(curl -fsS -X POST "$API/api/v1/itineraries" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"Smoke test trip","destinationSummary":"Test destination"}')
+ITINERARY_ID=$(echo "$ITINERARY" | jget '.id')
+check "customer can create a trip plan" "$([ -n "$ITINERARY_ID" ] && [ "$ITINERARY_ID" != "null" ] && echo true || echo false)"
+curl -fsS -X POST "$API/api/v1/itineraries/$ITINERARY_ID/items" \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
+  -d "{\"orderId\":\"$ORDER_ID\",\"day\":2}" >/dev/null
+ITINERARIES=$(curl -fsS "$API/api/v1/itineraries" -H "Authorization: Bearer $TOKEN")
+check "confirmed booking appears in its selected trip day" "$(echo "$ITINERARIES" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const a=JSON.parse(d);console.log(a.some(p=>p.id==='$ITINERARY_ID'&&p.items.some(i=>i.orderId==='$ORDER_ID'&&i.day===2)))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
 
 TICKET_NUM=$(echo "$DETAIL2" | jget '.tickets.0.ticketNumber')
 check "an e-ticket was issued (${TICKET_NUM:-none})" "$([ -n "$TICKET_NUM" ] && [ "$TICKET_NUM" != "null" ] && echo true || echo false)"
@@ -311,6 +707,100 @@ check "admin routes reject anonymous access (403/401)" "$([ "$FORBIDDEN" = "403"
 
 USER_ON_ADMIN=$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/admin/dashboard" -H "Authorization: Bearer $TOKEN")
 check "admin routes reject customer access (403)" "$([ "$USER_ON_ADMIN" = "403" ] && echo true || echo false)"
+
+head2 "Flight connections (multi-leg itineraries)"
+# `FlightSegment` exists so "which flights connect through DXB?" is a WHERE
+# clause rather than a scan of a Json blob. These assert the endpoint answers
+# from real data: every seeded flight used to be a single direct hop, which made
+# the connection search correct but permanently empty.
+CONN_POINTS=$(curl -fsS "$API/api/v1/search/connections/points")
+CONN_COUNT=$(echo "$CONN_POINTS" | json_field 'o.items.length')
+check "connection points are discoverable (${CONN_COUNT:-0})" "$([ "${CONN_COUNT:-0}" -gt 0 ] 2>/dev/null && echo true || echo false)"
+
+# Take the airport the data itself reports, rather than hardcoding DXB: this
+# keeps the test honest if the seeds ever stop routing through the Gulf.
+CONN_AIRPORT=$(echo "$CONN_POINTS" | json_field 'o.items[0] && o.items[0].airport')
+check "a connection point names its airport (${CONN_AIRPORT:-none})" "$([ -n "$CONN_AIRPORT" ] && [ "$CONN_AIRPORT" != "null" ] && echo true || echo false)"
+
+CONNECTED=$(curl -fsS "$API/api/v1/search/connections?airport=$CONN_AIRPORT&requireChange=true")
+CONNECTED_TOTAL=$(echo "$CONNECTED" | json_field 'o.total')
+check "flights connect through ${CONN_AIRPORT} (${CONNECTED_TOTAL:-0})" "$([ "${CONNECTED_TOTAL:-0}" -gt 0 ] 2>/dev/null && echo true || echo false)"
+
+# requireChange must actually exclude a direct flight: a flight that merely
+# departs the airport has not "connected through" it.
+DIRECT_AT_HUB=$(curl -fsS "$API/api/v1/search/connections?airport=$CONN_AIRPORT")
+DIRECT_TOTAL=$(echo "$DIRECT_AT_HUB" | json_field 'o.total')
+CONNECTED_LE_DIRECT=$([ "${DIRECT_TOTAL:-0}" -gt "${CONNECTED_TOTAL:-0}" ] 2>/dev/null && echo true || echo false)
+check "requireChange narrows the result set (${CONNECTED_TOTAL:-0} of ${DIRECT_TOTAL:-0})" "$CONNECTED_LE_DIRECT"
+
+# A connecting itinerary needs at least two legs, in order.
+FIRST_ITINERARY=$(echo "$CONNECTED" | json_field 'o.items[0] && o.items[0].itinerary')
+LEG_COUNT=$(echo "$FIRST_ITINERARY" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const a=JSON.parse(d);console.log(Array.isArray(a)?a.length:0)}catch{console.log(0)}})")
+check "a connecting itinerary has 2+ legs (${LEG_COUNT:-0})" "$([ "${LEG_COUNT:-0}" -ge 2 ] 2>/dev/null && echo true || echo false)"
+
+# Layover filters must bite, not silently pass everything through.
+TIGHT=$(curl -fsS "$API/api/v1/search/connections?airport=$CONN_AIRPORT&requireChange=true&maxLayoverMinutes=1")
+TIGHT_TOTAL=$(echo "$TIGHT" | json_field 'o.total')
+check "an impossible layover cap excludes everything (${TIGHT_TOTAL:-0} of ${CONNECTED_TOTAL:-0})" "$([ "${TIGHT_TOTAL:-0}" -eq 0 ] 2>/dev/null && echo true || echo false)"
+
+head2 "Flight route sanity"
+# A flight whose departure and arrival are the same airport is not a flight, it
+# is a rounding error. Seven of the 34 flight products were `JFK → JFK` because
+# both ends of the route were picked from the same hand-written pool; the
+# departure is now derived from the city's real nearest airport.
+DEGENERATE=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=50" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);const bad=j.items.filter(i=>{const r=i.category?.flightRoute;if(!r)return false;const parts=r.split(/\s*(?:→|->|➜)\s*/).filter(Boolean);return parts.length>=2&&parts[0]===parts[parts.length-1];});console.log(bad.length)}catch{console.log(-1)}})")
+check "no flight departs and arrives at the same airport (${DEGENERATE:-?} degenerate)" "$([ "${DEGENERATE:-1}" = "0" ] && echo true || echo false)"
+
+# Every leg of a multi-leg itinerary must move: a change of gauge that departs
+# where it arrived produced `JFK → DXB → DXB`.
+BAD_LEGS=$(curl -fsS "$API/api/v1/search/connections?airport=DXB" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);let bad=0;for(const it of j.items){for(const leg of it.itinerary??[]){if(leg.departureAirport===leg.arrivalAirport)bad++}}console.log(bad)}catch{console.log(-1)}})")
+check "no flight leg starts and ends at the same airport (${BAD_LEGS:-?} bad legs)" "$([ "${BAD_LEGS:-1}" = "0" ] && echo true || echo false)"
+
+head2 "Supply source (imported airports)"
+# The airport directory is imported from OurAirports (public domain) by
+# `pnpm --filter @easytrip/api supply:import`. These assert the import actually
+# landed and is reachable — an import that writes rows nothing can query is the
+# same dead weight the schema audit exists to catch, one layer up.
+#
+# Skipped when the import has not been run, because a fresh `pnpm setup` should
+# not fail on an optional dataset. `pnpm verify` runs after setup, so this is
+# opt-in rather than a gate.
+AIRPORTS=$(curl -fsS "$API/api/v1/search/airports?q=DXB")
+AIRPORT_TOTAL=$(echo "$AIRPORTS" | json_field 'o.total')
+AIRPORT_IATA=$(echo "$AIRPORTS" | json_field 'o.items[0] && o.items[0].iataCode')
+if [[ "${AIRPORT_TOTAL:-0}" == "0" ]]; then
+  cat <<'NOTE'
+  – supply import not run — skipping (pnpm --filter @easytrip/api supply:import)
+NOTE
+else
+  check "an imported airport is searchable by code ($AIRPORT_IATA)" "$([ "$AIRPORT_IATA" = "DXB" ] && echo true || echo false)"
+
+  AIRPORT_ORIGIN=$(echo "$AIRPORTS" | json_field 'o.items[0] && o.items[0].origin')
+  check "an imported airport records its origin (${AIRPORT_ORIGIN:-none})" "$([ "$AIRPORT_ORIGIN" = "OPEN_DATASET" ] && echo true || echo false)"
+
+  # Coordinates are the point of the import: a code with no position cannot be
+  # placed on a map or used for a proximity search.
+  AIRPORT_LAT=$(echo "$AIRPORTS" | json_field 'o.items[0] && o.items[0].latitude')
+  check "an imported airport carries real coordinates (${AIRPORT_LAT:-none})" "$([ -n "$AIRPORT_LAT" ] && [ "$AIRPORT_LAT" != "null" ] && echo true || echo false)"
+
+  # Licence has to be attributable from the data, not from memory — see
+  # docs/supply-sources.md.
+  AIRPORT_LICENSE=$(curl -fsS "$API/api/v1/search/airports/DXB/source" | json_field 'o.sources[0] && o.sources[0].license')
+  check "an imported airport carries its dataset licence (${AIRPORT_LICENSE:-none})" "$([ -n "$AIRPORT_LICENSE" ] && [ "$AIRPORT_LICENSE" != "null" ] && echo true || echo false)"
+
+  # Proximity: Singapore's Changi is ~0.4km from the city centre reference used
+  # below, so a correct great-circle filter returns it first.
+  NEAR=$(curl -fsS "$API/api/v1/search/airports?near=1.35,103.99&radiusKm=100&limit=5")
+  NEAR_FIRST=$(echo "$NEAR" | json_field 'o.items[0] && o.items[0].iataCode')
+  check "airports near a point rank by real distance ($NEAR_FIRST)" "$([ "$NEAR_FIRST" = "SIN" ] && echo true || echo false)"
+
+  NEAR_COUNT=$(echo "$NEAR" | json_field 'o.items.length')
+  check "a proximity search returns several real airports (${NEAR_COUNT:-0})" "$([ "${NEAR_COUNT:-0}" -ge 3 ] 2>/dev/null && echo true || echo false)"
+
+  # A radius must actually bound the result, or the filter is decorative.
+  FAR=$(curl -fsS "$API/api/v1/search/airports?near=1.35,103.99&radiusKm=5" | json_field 'o.total')
+  check "a tight radius excludes distant airports (${FAR:-?} within 5km)" "$([ "${FAR:-99}" -lt "${NEAR_COUNT:-0}" ] 2>/dev/null && echo true || echo false)"
+fi
 
 # ---------------------------------------------------------------------------
 printf "\n\033[1m══ Summary ══\033[0m\n"

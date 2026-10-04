@@ -36,6 +36,19 @@ export type SearchParams = {
   instantConfirmOnly?: boolean;
   freeCancellationOnly?: boolean;
   skipTheLineOnly?: boolean;
+  /**
+   * Phase 0 category facets. Each one is meaningful for a single category and
+   * simply yields no matches elsewhere, so they do not need to be namespaced by
+   * category — `starRating=5&type=HOTEL_ROOM` is the intended usage, and
+   * `starRating=5&type=FLIGHT` correctly returns nothing rather than silently
+   * dropping the filter.
+   */
+  starRatingIn?: number[];
+  carrierCodeIn?: string[];
+  carrierNameIn?: string[];
+  shipNameIn?: string[];
+  destinationPortIn?: string[];
+  boardBasisIn?: string[];
   languages?: string[];
   tags?: string[];
   latitude?: number;
@@ -118,6 +131,25 @@ export type SearchHit = {
   tags: string[];
 
   /**
+   * Category facets, carried straight from `SearchDocument`.
+   *
+   * These are the Phase 0 additions: a hotel can be filtered by official stars
+   * and board basis, a flight by carrier and route, a cruise by ship. They stay
+   * flat and nullable here because the storefront renders a card per category —
+   * a `HotelCard` needs `starRating`, a `FlightCard` needs `routeSummary`, and
+   * neither should have to know the other's field exists. The structured form
+   * lives in the `ProductStay` / `ProductFlight` / `ProductSailing` tables and
+   * is served by the product endpoint, not the search list.
+   */
+  starRating: number | null;
+  boardBasis: string | null;
+  carrierCode: string | null;
+  carrierName: string | null;
+  routeSummary: string | null;
+  shipName: string | null;
+  destinationPort: string | null;
+
+  /**
    * Category-specific display fields, mirrored from `Product`.
    *
    * The storefront renders a different card per category — a flight shows the
@@ -171,6 +203,14 @@ async function resolveAvailabilityAndPrice(
   const result = new Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>();
   if (productIds.length === 0) return result;
 
+  // Bundles carry no inventory of their own, so they must bypass the
+  // availability gate below and be resolved from their components instead.
+  const bundleRows = await prisma.productBundle.findMany({
+    where: { productId: { in: productIds } },
+    select: { productId: true },
+  });
+  const bundleProductIds = new Set(bundleRows.map((b) => b.productId));
+
   const ticketTypes = await prisma.ticketType.findMany({
     where: { productId: { in: productIds }, active: true },
     select: {
@@ -194,7 +234,11 @@ async function resolveAvailabilityAndPrice(
 
     // With explicit dates we require availability on *at least one* of them;
     // this keeps multi-date browsing useful while never showing dead ends.
-    if (available <= 0) continue;
+    // A bundle is exempt: it never holds stock itself, and its availability is
+    // resolved from its components in `addBundleAvailability`. Gating it here
+    // would drop every package from search.
+    const isBundle = bundleProductIds.has(ticketType.productId);
+    if (available <= 0 && !isBundle) continue;
 
     const existing = result.get(ticketType.productId);
     if (!existing || ticketType.basePriceCents < existing.minPriceCents) {
@@ -207,7 +251,80 @@ async function resolveAvailabilityAndPrice(
     }
   }
 
+  await addBundleAvailability(result, bundleProductIds, dates, requestedDates);
+
   return result;
+}
+
+/**
+ * Folds component availability up into each bundle.
+ *
+ * A bundle holds no inventory of its own — its `TicketType` exists only as a
+ * booking entry point, and what is actually sold is its components. Left
+ * unhandled, every package is dropped by the "no availability" rule above and
+ * silently disappears from search, which is how a seeded package can exist in
+ * the database and return zero results.
+ *
+ * A package is bookable when every **required** component has stock. Optional
+ * components are skipped on expansion if they are sold out, so letting one gate
+ * the package would hide trips that are still perfectly bookable.
+ */
+async function addBundleAvailability(
+  result: Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>,
+  bundleProductIds: Set<string>,
+  dates: Date[],
+  requestedDates?: string[],
+): Promise<void> {
+  if (bundleProductIds.size === 0) return;
+
+  const bundles = await prisma.productBundle.findMany({
+    where: { productId: { in: [...bundleProductIds] } },
+    include: { components: true },
+  });
+  if (bundles.length === 0) return;
+
+  const componentIds = bundles.flatMap((b) => b.components.map((c) => c.ticketTypeId));
+  if (componentIds.length === 0) return;
+
+  const componentTypes = await prisma.ticketType.findMany({
+    where: { id: { in: componentIds }, active: true },
+    select: {
+      id: true,
+      inventoryMode: true,
+      inventory: dates.length
+        ? { where: { serviceDate: { in: dates } }, select: { capacityTotal: true, capacityHeld: true, capacitySold: true, status: true } }
+        : { where: { serviceDate: { gte: new Date() } }, select: { capacityTotal: true, capacityHeld: true, capacitySold: true, status: true }, take: 40 },
+    },
+  });
+
+  for (const bundle of bundles) {
+    const own = result.get(bundle.productId);
+    if (!own) continue;
+
+    const unitsFor = (ticketTypeId: string): number => {
+      const type = componentTypes.find((t) => t.id === ticketTypeId);
+      if (!type) return 0;
+      return type.inventory.reduce((total, record) => {
+        if (record.status === 'CLOSED' || record.status === 'SOLD_OUT') return total;
+        if (type.inventoryMode === 'UNLIMITED') return total + 1_000;
+        return total + Math.max(0, record.capacityTotal - record.capacityHeld - record.capacitySold);
+      }, 0);
+    };
+
+    // Required components gate the package; optional ones only widen it.
+    const required = bundle.components.filter((c) => c.required);
+    const gating = required.length > 0 ? required : bundle.components;
+    const leastAvailable = gating.map((c) => unitsFor(c.ticketTypeId)).sort((a, b) => a - b)[0] ?? 0;
+    if (leastAvailable <= 0) continue;
+
+    result.set(bundle.productId, {
+      ...own,
+      // A trip of several bookings can be sold to fewer travellers than any one
+      // component allows on its own.
+      availableQty: Math.min(leastAvailable, own.availableQty || leastAvailable),
+      nextDate: own.nextDate ?? requestedDates?.[0] ?? null,
+    });
+  }
 }
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -305,6 +422,12 @@ async function searchPostgres(params: SearchParams): Promise<SearchResult> {
   if (params.instantConfirmOnly) whereBase.instantConfirm = true;
   if (params.freeCancellationOnly) whereBase.freeCancellation = true;
   if (params.skipTheLineOnly) whereBase.skipTheLine = true;
+  if (params.starRatingIn?.length) whereBase.starRating = { in: params.starRatingIn };
+  if (params.carrierCodeIn?.length) whereBase.carrierCode = { in: params.carrierCodeIn };
+  if (params.carrierNameIn?.length) whereBase.carrierName = { in: params.carrierNameIn };
+  if (params.shipNameIn?.length) whereBase.shipName = { in: params.shipNameIn };
+  if (params.destinationPortIn?.length) whereBase.destinationPort = { in: params.destinationPortIn };
+  if (params.boardBasisIn?.length) whereBase.boardBasis = { in: params.boardBasisIn };
   if (params.tags?.length) whereBase.tags = { hasSome: params.tags.map((t) => t.toLowerCase()) };
 
   if (andFilters.length > 0) whereBase.AND = andFilters;
@@ -361,6 +484,13 @@ async function searchPostgres(params: SearchParams): Promise<SearchResult> {
         nextAvailableDate: price.nextDate,
         badge: null,
         tags: doc.tags,
+        starRating: doc.starRating ?? null,
+        boardBasis: doc.boardBasis ?? null,
+        carrierCode: doc.carrierCode ?? null,
+        carrierName: doc.carrierName ?? null,
+        routeSummary: doc.routeSummary ?? null,
+        shipName: doc.shipName ?? null,
+        destinationPort: doc.destinationPort ?? null,
       };
     });
 
@@ -644,6 +774,12 @@ async function searchOpenSearch(params: SearchParams): Promise<SearchResult> {
   if (params.instantConfirmOnly) facetFilter.push({ term: { instantConfirm: true } });
   if (params.freeCancellationOnly) facetFilter.push({ term: { freeCancellation: true } });
   if (params.skipTheLineOnly) facetFilter.push({ term: { skipTheLine: true } });
+  if (params.starRatingIn?.length) facetFilter.push({ terms: { starRating: params.starRatingIn } });
+  if (params.carrierCodeIn?.length) facetFilter.push({ terms: { carrierCode: params.carrierCodeIn } });
+  if (params.carrierNameIn?.length) facetFilter.push({ terms: { carrierName: params.carrierNameIn } });
+  if (params.shipNameIn?.length) facetFilter.push({ terms: { shipName: params.shipNameIn } });
+  if (params.destinationPortIn?.length) facetFilter.push({ terms: { destinationPort: params.destinationPortIn } });
+  if (params.boardBasisIn?.length) facetFilter.push({ terms: { boardBasis: params.boardBasisIn } });
   if (params.minPriceCents !== undefined) facetFilter.push({ range: { basePriceCents: { gte: params.minPriceCents } } });
   if (params.maxPriceCents !== undefined) facetFilter.push({ range: { basePriceCents: { lte: params.maxPriceCents } } });
 
@@ -767,6 +903,13 @@ async function searchOpenSearch(params: SearchParams): Promise<SearchResult> {
           nextAvailableDate: price.nextDate,
           badge: null,
           tags: (h.tags as string[]) ?? [],
+          starRating: (h.starRating as number) ?? null,
+          boardBasis: (h.boardBasis as string) ?? null,
+          carrierCode: (h.carrierCode as string) ?? null,
+          carrierName: (h.carrierName as string) ?? null,
+          routeSummary: (h.routeSummary as string) ?? null,
+          shipName: (h.shipName as string) ?? null,
+          destinationPort: (h.destinationPort as string) ?? null,
         };
       });
 

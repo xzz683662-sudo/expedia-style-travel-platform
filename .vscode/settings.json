@@ -1,4 +1,5 @@
 {
+    "typescript.tsdk": "node_modules/typescript/lib",
     "editor.experimental.preferTreeSitter.css": true,
     "editor.experimental.preferTreeSitter.typescript": true,
     "editor.experimental.treeSitterTelemetry": true,
@@ -17,5 +18,6 @@
     "dictation.showButton": false,
     "dictation.model": "nemotron-3.5-asr-streaming-0.6b",
     "dictation.showTranscript": false,
-    "dictation.experimental.llmCleanup": false
+    "dictation.experimental.llmCleanup": false,
+    "js/ts.experimental.useTsgo": false
 }

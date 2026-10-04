@@ -20,6 +20,7 @@ import { brandMark, brandName } from '@/lib/brand';
 
 const NAV = [
   { href: '/search', key: 'nav.experiences' },
+  { href: '/cart', key: 'nav.cart' },
   { href: '/collections/trending', key: 'nav.trending' },
   { href: '/collections/free-cancellation', key: 'nav.freeCancellation' },
 ] as const;
@@ -27,6 +28,8 @@ const NAV = [
 const ACCOUNT_NAV = [
   { href: '/orders', key: 'nav.myOrders' },
   { href: '/tickets', key: 'nav.myTickets' },
+  { href: '/wishlist', key: 'nav.wishlist' },
+  { href: '/itineraries', key: 'nav.myItineraries' },
   { href: '/loyalty', key: 'nav.rewards' },
 ] as const;
 

@@ -10,6 +10,7 @@
 
 const TOKEN_KEY = 'easytrip_token';
 const USER_KEY = 'easytrip_user';
+const CART_TOKEN_KEY = 'easytrip_guest_cart_token';
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days, matches a typical refresh window
 
 type SessionListener = () => void;
@@ -46,6 +47,19 @@ function notifySessionChange(): void {
 export function readToken(): string | null {
   if (typeof window === 'undefined') return null;
   return window.localStorage.getItem(TOKEN_KEY);
+}
+
+export function readCartToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  return window.localStorage.getItem(CART_TOKEN_KEY);
+}
+
+export function saveCartToken(token: string): void {
+  window.localStorage.setItem(CART_TOKEN_KEY, token);
+}
+
+export function clearCartToken(): void {
+  window.localStorage.removeItem(CART_TOKEN_KEY);
 }
 
 export function readUser<T>(): T | null {

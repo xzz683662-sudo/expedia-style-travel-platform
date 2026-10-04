@@ -44,6 +44,15 @@ pnpm workspace (`pnpm-workspace.yaml`, `pnpm-lock.yaml`). Root `package.json` ho
   than hardcoding a relative depth — `__dirname` is the process cwd under `tsx` but the source dir under
   `node dist`.
 - `.env.example` lives at the repo root.
+- **The Prisma CLI cannot see the root `.env`.** The walk-up in `config/env.ts` is runtime-only;
+  `prisma db push` resolves `env("DATABASE_URL")` itself and only looks at `apps/api/.env`.
+  For CLI runs: `(cd apps/api && set -a && . ../../.env && set +a && npx prisma db push …)`.
+- **`prisma db push` hangs in a non-TTY terminal** when it shows a data-loss warning
+  (e.g. adding a `@unique` column): it blocks on `? Do you want to ignore the warning(s)?`
+  with no output. Not a network problem. Always pass `--accept-data-loss` non-interactively.
+- A **stale `tsx watch` from an earlier session can still own port 4000**. A fresh
+  `pnpm dev:api` then logs `EADDRINUSE` while `/ready` returns 200 from the *old* build, so
+  smoke tests can pass against stale code. `pkill -f 'tsx watch'` before restarting.
 
 ### Prisma 5
 - `@@unique([a,b,c])` **cannot include a nullable field** — `c` is generated as non-null `string`.
@@ -61,7 +70,7 @@ pnpm workspace (`pnpm-workspace.yaml`, `pnpm-lock.yaml`). Root `package.json` ho
   Seed via the real issuer, plus the `backfillTicketArtifacts()` self-heal for old rows.
 - Tickets are written under `apps/api/storage/tickets/TKT-XXXX-XXXX-XXXX/`.
 
-### i18n (`apps/web/src/lib/dictionaries.ts`)
+### i18n (`apps/web/src/lib/i18n/dictionaries.ts`)
 - `as const` on the `en` dictionary freezes literals and produces hundreds of type errors in `zh`.
   Recursive mapped types are worse (TS2536/TS2322/TS2345).
   The only working shape: **no `as const` on `en`**, **no type annotation on `zh`**, validated by
@@ -104,3 +113,6 @@ pnpm workspace (`pnpm-workspace.yaml`, `pnpm-lock.yaml`). Root `package.json` ho
 - Auth/role gates are added in `apps/api/src/plugins/auth.ts` — check it before adding a new protected route.
 - Prisma client singleton: `apps/api/src/lib/prisma.ts`. Env schema: `apps/api/src/config/env.ts`.
 - Verify changes with `scripts/smoke-test.sh` (and `realtime-test.mjs` for the realtime module).
+  `pnpm verify` runs typecheck → smoke → realtime → mobile in one shot. Baseline as of
+  2026-10-02: smoke **55/55**, realtime **18/18**, mobile **40/40**. `mobile-check.sh` reads the
+  **built** CSS, so run `pnpm --filter @easytrip/web build` first (`next dev` deletes `.next`).

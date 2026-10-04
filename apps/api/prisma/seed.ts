@@ -40,12 +40,19 @@ import { indexProduct } from '../src/modules/search/service';
 import { refreshAvailabilityCalendar } from '../src/modules/search/service';
 import { DESTINATIONS, MERCHANTS, type SeedDestination, type SeedPriceRule, type SeedProduct } from './seed-data';
 import { COUPONS, PRODUCTS } from './seed-products';
+import { backfillCategoryExtensions } from './seed-category-extensions';
+import { seedBundles } from './seed-bundles';
+import { reindexAll } from '../src/modules/search/service';
+import { setAirportsByCity, type AirportIndex } from './seed-global';
+import { airportsWithin } from './nearest-airport';
+import { CITIES } from './seed-cities';
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
 const INVENTORY_WINDOW_DAYS = 120;
+const includeDemoData = process.env.SEED_DEMO_DATA !== 'false';
 
 function priceRuleKind(kind: SeedPriceRule['kind']): PriceRuleKind {
   return kind as PriceRuleKind;
@@ -138,6 +145,24 @@ async function main() {
   }
 
   logger.info('seed.merchants', { count: merchantBySlug.size });
+
+  // -------------------------------------------------------------------------
+  // 2b. Real departure airports, from the OurAirports import.
+  //
+  // Flight routes need an airport the city actually departs from. Previously
+  // both ends of a route came from the same hand-written `HUBS` list, so they
+  // could coincide and the catalogue grew `JFK → JFK` products — seven of the
+  // 34 flights. Resolving the departure from geography removes the possibility.
+  //
+  // Optional by design: the import may not have been run, and a weaker route
+  // beats a broken seed. See `pnpm supply:import` and docs/supply-sources.md.
+  // -------------------------------------------------------------------------
+  const airportIndex = await buildAirportIndex();
+  setAirportsByCity(airportIndex);
+  logger.info('seed.departure_airports', {
+    cities: airportIndex.size,
+    airports: [...airportIndex.values()].reduce((sum, list) => sum + list.length, 0),
+  });
 
   // -------------------------------------------------------------------------
   // 3. Products, variants, media, rules, inventory
@@ -422,28 +447,30 @@ async function main() {
       });
     }
 
-    // --- Reviews + rating aggregates -------------------------------------
-    const customer = await ensureCustomer();
-    await prisma.review.deleteMany({ where: { productId: product.id, userId: customer.id } });
+    if (includeDemoData) {
+      // --- Reviews + rating aggregates -----------------------------------
+      const customer = await ensureCustomer();
+      await prisma.review.deleteMany({ where: { productId: product.id, userId: customer.id } });
 
-    for (const review of definition.reviews ?? []) {
-      await prisma.review.create({
-        data: {
-          productId: product.id,
-          userId: customer.id,
-          rating: review.rating,
-          title: review.title,
-          body: review.body,
-          locale: review.locale ?? 'en',
-          status: ReviewStatus.PUBLISHED,
-          helpfulCount: review.helpfulCount ?? Math.floor(Math.random() * 24),
-          visitedAt: new Date(Date.now() - review.daysAgo * 86_400_000),
-          createdAt: new Date(Date.now() - review.daysAgo * 86_400_000),
-        },
-      });
+      for (const review of definition.reviews ?? []) {
+        await prisma.review.create({
+          data: {
+            productId: product.id,
+            userId: customer.id,
+            rating: review.rating,
+            title: review.title,
+            body: review.body,
+            locale: review.locale ?? 'en',
+            status: ReviewStatus.PUBLISHED,
+            helpfulCount: review.helpfulCount ?? Math.floor(Math.random() * 24),
+            visitedAt: new Date(Date.now() - review.daysAgo * 86_400_000),
+            createdAt: new Date(Date.now() - review.daysAgo * 86_400_000),
+          },
+        });
+      }
+
+      await recomputeRatings(product.id);
     }
-
-    await recomputeRatings(product.id);
   }
 
   logger.info('seed.products', { products: productCount, ticketTypes: ticketTypeCount, inventoryRows: inventoryCount });
@@ -473,44 +500,6 @@ async function main() {
     });
   }
 
-  await prisma.promotion.deleteMany({});
-  await prisma.promotion.createMany({
-    data: [
-      {
-        slug: 'summer-city-breaks',
-        title: 'City breaks from $19',
-        subtitle: 'Museums, tours and cruises across Europe and the US',
-        body: 'Book a museum pass, a guided tour or a sunset cruise and save on the usual city break prices.',
-        ctaLabel: 'Browse city breaks',
-        ctaUrl: '/search?sort=PRICE_ASC',
-        startsAt: new Date(Date.now() - 86_400_000),
-        endsAt: addDays(new Date(), 90),
-        position: 1,
-      },
-      {
-        slug: 'family-adventure',
-        title: 'Family days out made easy',
-        subtitle: 'Kids go free deals and family bundles',
-        body: 'Family bundles that bundle the tickets, the guides and the queue-skipping into one price.',
-        ctaLabel: 'See family offers',
-        ctaUrl: '/search?tags=family',
-        startsAt: new Date(Date.now() - 86_400_000),
-        endsAt: addDays(new Date(), 120),
-        position: 2,
-      },
-      {
-        slug: 'free-cancellation',
-        title: 'Plans change. Free cancellation on thousands of experiences.',
-        subtitle: 'Cancel up to 24 hours before for a full refund',
-        ctaLabel: 'Browse flexible options',
-        ctaUrl: '/search?freeCancellation=true',
-        startsAt: new Date(Date.now() - 86_400_000),
-        endsAt: addDays(new Date(), 180),
-        position: 3,
-      },
-    ],
-  });
-
   // -------------------------------------------------------------------------
   // 5. Add-ons
   // -------------------------------------------------------------------------
@@ -538,19 +527,38 @@ async function main() {
   }
 
   // -------------------------------------------------------------------------
-  // 7. Demo orders (paid, with issued tickets) so the console has data
+  // 7. Demo data is opt-in for hosted databases.
   // -------------------------------------------------------------------------
-  await seedDemoOrders();
-
-  // -------------------------------------------------------------------------
-  // 8. Staff accounts
-  // -------------------------------------------------------------------------
-  await ensureStaff();
+  if (includeDemoData) {
+    await seedDemoOrders();
+    await ensureStaff();
+  } else {
+    logger.info('seed.demo_data_skipped');
+  }
 
   // -------------------------------------------------------------------------
   // 9. Promo banners so the storefront strip has something to render
   // -------------------------------------------------------------------------
   await seedPromoBanners();
+
+  // -------------------------------------------------------------------------
+  // 10. Phase 0 category extensions + search facets.
+  //    Idempotent, so it also self-heals a database seeded before these tables
+  //    existed.
+  // -------------------------------------------------------------------------
+  await backfillCategoryData();
+
+  // 11. Rebuild the denormalised search index.
+  //
+  //     `reindexAll` existed and was never called from anywhere. Search reads
+  //     `ProductSearchBlob`, which the seed writes once and never refreshes, so
+  //     any product field the seed later corrects stayed wrong for search: a
+  //     flight reseeded from `SIN → JFK` to `SIN → DXB → JFK` was still
+  //     indexed as direct, and `?q=london-international-flight` returned zero
+  //     hits for a product that plainly existed.
+  // ---------------------------------------------------------------------------
+  const reindexed = await reindexAll();
+  logger.info('seed.search_reindexed', { products: reindexed });
 
   logger.info('seed.done');
 }
@@ -930,6 +938,61 @@ async function backfillTicketArtifacts(): Promise<void> {
   }
 
   logger.info('seed.ticket_artifacts_backfilled', { count: orphans.length });
+}
+
+/**
+ * Phase 0: bring the category extension tables and the new search facets up to
+ * date.
+ *
+ * Idempotent and non-destructive — it upgrades an existing database in place.
+ * See `seed-category-extensions.ts` for what it can and cannot derive.
+ */
+/**
+ * Resolve each city's real departure airports from the OurAirports import.
+ *
+ * Cities carry an anchor coordinate; the airports carry real ones. Matching
+ * them is a nearest-neighbour question, and the answer is only as good as the
+ * radius — 60km catches a city's metro airports (London Heathrow, Stansted,
+ * Gatwick, City) without reaching the next city over.
+ *
+ * Returns an empty map when the import has not been run, and `flightProduct`
+ * then falls back. That is the right failure: a missing optional dataset
+ * should degrade the catalogue, not abort the seed.
+ */
+async function buildAirportIndex(): Promise<AirportIndex> {
+  const index: AirportIndex = new Map();
+
+  const airports = await prisma.destination.findMany({
+    where: { level: 'AIRPORT', iataCode: { not: null } },
+    select: { iataCode: true, name: true, latitude: true, longitude: true },
+  });
+  if (airports.length === 0) return index;
+
+  const usable = airports
+    .filter((a): a is typeof a & { iataCode: string; latitude: number; longitude: number } =>
+      a.iataCode !== null && a.latitude !== null && a.longitude !== null,
+    )
+    .map((a) => ({ iataCode: a.iataCode, name: a.name, latitude: a.latitude, longitude: a.longitude }));
+
+  for (const city of CITIES) {
+    const nearby = airportsWithin(city.anchor, usable, 60, 3);
+    // A city with no airport within range gets none: inventing a departure
+    // would put the product in the wrong country, which is worse than letting
+    // the factory use its documented fallback.
+    if (nearby.length > 0) {
+      index.set(
+        city.slug,
+        nearby.map((a) => ({ iataCode: a.iataCode, latitude: a.latitude, longitude: a.longitude })),
+      );
+    }
+  }
+
+  return index;
+}
+
+async function backfillCategoryData(): Promise<void> {
+  await backfillCategoryExtensions(prisma);
+  await seedBundles(prisma);
 }
 
 main()

@@ -2,8 +2,9 @@
 
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import type { ProductDetail } from '@/lib/api';
-import { formatDate, formatMoney, relativeDay } from '@/lib/format';
+import { api, ApiError, type ProductDetail } from '@/lib/api';
+import { addDaysIso, formatDate, formatMoney, relativeDay } from '@/lib/format';
+import { readCartToken, readToken, saveCartToken } from '@/lib/session';
 import type { LocaleCode } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 
@@ -34,6 +35,28 @@ export function BookingPanel({
   const [quantity, setQuantity] = useState(Math.min(Math.max(1, initialQuantity), product.ticketTypes[0]?.maxPerOrder ?? 1));
   const [coupon, setCoupon] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [cartMessage, setCartMessage] = useState<string | null>(null);
+  const [cartError, setCartError] = useState<string | null>(null);
+
+  /**
+   * A stay needs a departure date; a ticket does not. `isStay` is read off the
+   * product type rather than a feature flag so a new multi-night category does
+   * not also need a switch flipped here.
+   */
+  const isStay = product.type === 'HOTEL_ROOM' || product.type === 'CRUISE';
+  const [checkOutDate, setCheckOutDate] = useState('');
+
+  /**
+   * Nights between arrival and departure. Checkout is exclusive — arriving
+   * Monday and leaving Thursday is 3 nights — so this is a plain day difference,
+   * and a departure on or before arrival yields 0, which hides the field's error
+   * rather than sending a range the server would reject.
+   */
+  const nights = useMemo(() => {
+    if (!isStay || !checkOutDate) return 0;
+    const ms = new Date(`${checkOutDate}T00:00:00Z`).getTime() - new Date(`${selectedDate}T00:00:00Z`).getTime();
+    return Number.isFinite(ms) ? Math.round(ms / 86_400_000) : 0;
+  }, [isStay, checkOutDate, selectedDate]);
 
   const selected = product.ticketTypes.find((t) => t.id === ticketTypeId) ?? product.ticketTypes[0];
 
@@ -42,11 +65,15 @@ export function BookingPanel({
   // let checkout re-price server-side before charging anything.
   const priced = useMemo(() => {
     if (!selected) return null;
+    // A stay is priced per room per night. `unitNights` is 1 for a ticket, so
+    // this reduces to the original quantity-only arithmetic.
+    const unitNights = isStay && nights > 0 ? nights : 1;
     return {
-      lineTotal: selected.totalPerUnitCents * quantity,
-      discountTotal: selected.discountCents * quantity,
+      unitNights,
+      lineTotal: selected.totalPerUnitCents * quantity * unitNights,
+      discountTotal: selected.discountCents * quantity * unitNights,
     };
-  }, [selected, quantity]);
+  }, [selected, quantity, isStay, nights]);
 
   if (!selected || !priced) {
     return (
@@ -77,6 +104,40 @@ export function BookingPanel({
     });
     if (coupon.trim()) params.set('coupon', coupon.trim());
     router.push(`/checkout?${params.toString()}`);
+  }
+
+  async function addToCart() {
+    setSubmitting(true);
+    setCartError(null);
+    setCartMessage(null);
+    try {
+      const token = readToken();
+      let cartToken = readCartToken();
+      const cart = await api.cart(token, cartToken, locale);
+      if (cart.guestToken) {
+        cartToken = cart.guestToken;
+        saveCartToken(cartToken);
+      }
+      await api.addCartItem(
+        {
+          ticketTypeId: selected.id,
+          serviceDate: selectedDate,
+          // Only send a range the user has actually made valid; a zero-night or
+          // inverted range is dropped so the line books as a single night rather
+          // than being rejected outright.
+          checkOutDate: isStay && nights > 0 ? checkOutDate : undefined,
+          quantity,
+        },
+        token,
+        cartToken,
+        locale,
+      );
+      setCartMessage(t('product.addedToCart'));
+    } catch (caught) {
+      setCartError(caught instanceof ApiError ? caught.message : t('cart.couldNotLoad'));
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   const offPercent =
@@ -121,6 +182,30 @@ export function BookingPanel({
             {formatDate(selectedDate)} · {relativeDay(selectedDate)}
           </a>
         </div>
+        {isStay && (
+          <label className="stack-sm" style={{ display: 'block' }}>
+            <span className="small muted">{t('product.checkOutLabel')}</span>
+            <input
+              type="date"
+              className="input"
+              value={checkOutDate}
+              // Arrival is the earliest sensible departure: a same-day or earlier
+              // checkout has no nights in it.
+              min={addDaysIso(selectedDate, 1)}
+              onChange={(event) => setCheckOutDate(event.target.value)}
+            />
+            {checkOutDate && nights <= 0 && (
+              <span className="tiny" style={{ color: 'var(--danger-600)' }}>
+                {t('product.checkOutAfterCheckIn')}
+              </span>
+            )}
+            {nights > 0 && (
+              <span className="tiny subtle">
+                {nights} {t('product.nights')} · {formatDate(selectedDate)} – {formatDate(checkOutDate)}
+              </span>
+            )}
+          </label>
+        )}
         {product.destination && (
           <div className="row-between">
             <span className="small muted">{t('product.locationLabel')}</span>
@@ -244,6 +329,16 @@ export function BookingPanel({
       <button className="btn btn-accent btn-lg btn-block" onClick={checkout} disabled={submitting}>
         {submitting ? t('product.preparingCheckout') : t('product.reserveAndPay')}
       </button>
+
+      <button className="btn btn-secondary btn-block" onClick={addToCart} disabled={submitting}>
+        {t('product.addToCart')}
+      </button>
+      {cartMessage && (
+        <p className="tiny center" role="status">
+          {cartMessage} · <a href="/cart">{t('nav.cart')}</a>
+        </p>
+      )}
+      {cartError && <p className="form-error" role="alert">{cartError}</p>}
 
       <p className="tiny subtle center">
         {t('product.notChargedYet', product.cancellationPolicy?.freeCancelHours ?? 24)}

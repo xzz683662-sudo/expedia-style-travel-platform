@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation';
+import { CartCheckoutFlow } from '@/components/CartExperience';
 import { CheckoutFlow } from '@/components/CheckoutFlow';
 import { resolveServerLocale } from '@/lib/i18n/config';
 
@@ -13,9 +14,10 @@ export default async function CheckoutPage({
 }) {
   const params = await searchParams;
   const slug = Array.isArray(params.slug) ? params.slug[0] : params.slug;
-
-  if (!slug) redirect('/search');
+  const cart = Array.isArray(params.cart) ? params.cart[0] : params.cart;
 
   const locale = await resolveServerLocale();
+  if (cart === '1') return <CartCheckoutFlow locale={locale} />;
+  if (!slug) redirect('/search');
   return <CheckoutFlow slug={slug} locale={locale} />;
 }
