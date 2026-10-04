@@ -743,6 +743,19 @@ TIGHT=$(curl -fsS "$API/api/v1/search/connections?airport=$CONN_AIRPORT&requireC
 TIGHT_TOTAL=$(echo "$TIGHT" | json_field 'o.total')
 check "an impossible layover cap excludes everything (${TIGHT_TOTAL:-0} of ${CONNECTED_TOTAL:-0})" "$([ "${TIGHT_TOTAL:-0}" -eq 0 ] 2>/dev/null && echo true || echo false)"
 
+head2 "Flight route sanity"
+# A flight whose departure and arrival are the same airport is not a flight, it
+# is a rounding error. Seven of the 34 flight products were `JFK → JFK` because
+# both ends of the route were picked from the same hand-written pool; the
+# departure is now derived from the city's real nearest airport.
+DEGENERATE=$(curl -fsS "$API/api/v1/search?type=FLIGHT&limit=50" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);const bad=j.items.filter(i=>{const r=i.category?.flightRoute;if(!r)return false;const parts=r.split(/\s*(?:→|->|➜)\s*/).filter(Boolean);return parts.length>=2&&parts[0]===parts[parts.length-1];});console.log(bad.length)}catch{console.log(-1)}})")
+check "no flight departs and arrives at the same airport (${DEGENERATE:-?} degenerate)" "$([ "${DEGENERATE:-1}" = "0" ] && echo true || echo false)"
+
+# Every leg of a multi-leg itinerary must move: a change of gauge that departs
+# where it arrived produced `JFK → DXB → DXB`.
+BAD_LEGS=$(curl -fsS "$API/api/v1/search/connections?airport=DXB" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);let bad=0;for(const it of j.items){for(const leg of it.itinerary??[]){if(leg.departureAirport===leg.arrivalAirport)bad++}}console.log(bad)}catch{console.log(-1)}})")
+check "no flight leg starts and ends at the same airport (${BAD_LEGS:-?} bad legs)" "$([ "${BAD_LEGS:-1}" = "0" ] && echo true || echo false)"
+
 head2 "Supply source (imported airports)"
 # The airport directory is imported from OurAirports (public domain) by
 # `pnpm --filter @easytrip/api supply:import`. These assert the import actually

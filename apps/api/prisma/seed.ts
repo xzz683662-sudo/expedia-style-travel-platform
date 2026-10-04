@@ -43,6 +43,9 @@ import { COUPONS, PRODUCTS } from './seed-products';
 import { backfillCategoryExtensions } from './seed-category-extensions';
 import { seedBundles } from './seed-bundles';
 import { reindexAll } from '../src/modules/search/service';
+import { setAirportsByCity, type AirportIndex } from './seed-global';
+import { airportsWithin } from './nearest-airport';
+import { CITIES } from './seed-cities';
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -142,6 +145,24 @@ async function main() {
   }
 
   logger.info('seed.merchants', { count: merchantBySlug.size });
+
+  // -------------------------------------------------------------------------
+  // 2b. Real departure airports, from the OurAirports import.
+  //
+  // Flight routes need an airport the city actually departs from. Previously
+  // both ends of a route came from the same hand-written `HUBS` list, so they
+  // could coincide and the catalogue grew `JFK → JFK` products — seven of the
+  // 34 flights. Resolving the departure from geography removes the possibility.
+  //
+  // Optional by design: the import may not have been run, and a weaker route
+  // beats a broken seed. See `pnpm supply:import` and docs/supply-sources.md.
+  // -------------------------------------------------------------------------
+  const airportIndex = await buildAirportIndex();
+  setAirportsByCity(airportIndex);
+  logger.info('seed.departure_airports', {
+    cities: airportIndex.size,
+    airports: [...airportIndex.values()].reduce((sum, list) => sum + list.length, 0),
+  });
 
   // -------------------------------------------------------------------------
   // 3. Products, variants, media, rules, inventory
@@ -926,6 +947,49 @@ async function backfillTicketArtifacts(): Promise<void> {
  * Idempotent and non-destructive — it upgrades an existing database in place.
  * See `seed-category-extensions.ts` for what it can and cannot derive.
  */
+/**
+ * Resolve each city's real departure airports from the OurAirports import.
+ *
+ * Cities carry an anchor coordinate; the airports carry real ones. Matching
+ * them is a nearest-neighbour question, and the answer is only as good as the
+ * radius — 60km catches a city's metro airports (London Heathrow, Stansted,
+ * Gatwick, City) without reaching the next city over.
+ *
+ * Returns an empty map when the import has not been run, and `flightProduct`
+ * then falls back. That is the right failure: a missing optional dataset
+ * should degrade the catalogue, not abort the seed.
+ */
+async function buildAirportIndex(): Promise<AirportIndex> {
+  const index: AirportIndex = new Map();
+
+  const airports = await prisma.destination.findMany({
+    where: { level: 'AIRPORT', iataCode: { not: null } },
+    select: { iataCode: true, name: true, latitude: true, longitude: true },
+  });
+  if (airports.length === 0) return index;
+
+  const usable = airports
+    .filter((a): a is typeof a & { iataCode: string; latitude: number; longitude: number } =>
+      a.iataCode !== null && a.latitude !== null && a.longitude !== null,
+    )
+    .map((a) => ({ iataCode: a.iataCode, name: a.name, latitude: a.latitude, longitude: a.longitude }));
+
+  for (const city of CITIES) {
+    const nearby = airportsWithin(city.anchor, usable, 60, 3);
+    // A city with no airport within range gets none: inventing a departure
+    // would put the product in the wrong country, which is worse than letting
+    // the factory use its documented fallback.
+    if (nearby.length > 0) {
+      index.set(
+        city.slug,
+        nearby.map((a) => ({ iataCode: a.iataCode, latitude: a.latitude, longitude: a.longitude })),
+      );
+    }
+  }
+
+  return index;
+}
+
 async function backfillCategoryData(): Promise<void> {
   await backfillCategoryExtensions(prisma);
   await seedBundles(prisma);

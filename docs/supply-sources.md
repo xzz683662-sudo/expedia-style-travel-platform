@@ -40,7 +40,7 @@ with no inventory of its own.
 | id | data | repo / entry point | license | fields used | refresh |
 | --- | --- | --- | --- | --- | --- |
 | `ourairports` | airports, IATA/ICAO codes | `github.com/davidmegginson/ourairports-data` | public domain | `ident`, `iata_code`, `name`, `latitude_deg`, `longitude_deg`, `iso_country` | monthly |
-| `openflights-routes` | airline route graph | `github.com/jpatokal/openflights` (`data/routes.dat`) | data ODbL, code AGPL | airline, src/dst IATA, stops | static (data ends 2014) |
+| `openflights-routes` | airline route graph | `github.com/jpatokal/openflights` (`data/routes.dat`) | data ODbL, code AGPL | airline, src/dst IATA, stops | **DEAD — forbidden, see below** |
 | `overture-places` | POIs (heavily deduped OSM + Meta + Microsoft + Amazon) | `github.com/OvertureMaps/overturemaps-py` | per-theme: CDLA-Permissive-2.0 / ODbL | `names`, `categories`, `geometry`, `addresses` | monthly (release) |
 | `osm-pois` | POI, roads, transit | planet / `download.geofabrik.de`; `github.com/osm-search/Nominatim` | ODbL (share-alike) | tags by category | weekly |
 | `fsq-os-places` | ~100M POIs w/ categories | `huggingface.co/datasets/foursquare/fsq-os-places` | Apache-2.0 | `name`, `category`, `latitude`, `longitude` | static release |
@@ -60,6 +60,28 @@ with no inventory of its own.
 | `MERCHANT_FEED` | external partner feed | from feed |
 
 ## Rules
+
+- **`openflights-routes` is forbidden. Do not write an adapter for it.**
+  Upstream states in its own `data.php`: *"The third-party that OpenFlights uses
+  for route data ceased providing updates in June 2014. The current data is of
+  historical value only."* The upstream was one person's server; it died, and
+  OpenFlights has had no route updates since. The toolchain is still Python 2.
+  `airports.dat` / `airlines.dat` *are* still refreshed — only `routes.dat` is
+  dead — but a schedule without routes is not a schedule.
+
+- **Never import a dataset whose freshness you have not verified against the
+  source itself.** A "static" note in this table is not evidence. Read the
+  upstream README, the file's last commit, or a freshness field. This rule
+  exists because a route adapter was written against exactly that dataset before
+  its deprecation notice was read.
+
+- **Schedule, fare and seat inventory cannot come from open data at all.** They
+  are regulated commercial assets airlines distribute through GDS/NDC partners;
+  there is no free, licence-clean, commercially redistributable source. The
+  architecture assumes this — `SupplyOrigin` carries `MERCHANT_FEED` and
+  `SYNTHETIC`, and every open-data adapter returns `[]` from `getRates()` /
+  `getAvailability()` with a comment saying the pricing and inventory engines
+  derive those instead.
 
 - `origin` is written at sync time and is queryable; it is never inferred at read time.
 - Prices and availability are never imported — only identity and geometry. They are

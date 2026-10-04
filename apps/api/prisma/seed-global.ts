@@ -287,13 +287,84 @@ function fill(template: string, values: Record<string, string>): string {
  */
 const CONNECT_HUB = 'DXB';
 
+/**
+ * Real airports, injected rather than imported.
+ *
+ * `buildGlobalProducts` is a pure function over `CITIES`, and it has to stay
+ * one: it is what makes the catalogue reproducible without a database. But a
+ * route cannot be built without knowing which airport a city actually departs
+ * from, and that is a fact about the world, not about this repo.
+ *
+ * So the caller resolves it — `seed.ts` reads the OurAirports import and passes
+ * it in. Omitting the argument falls back to the old behaviour, which is why
+ * the fallback is written to be *correct* (never a same-airport route) rather
+ * than merely non-crashing.
+ */
+export interface SeedAirport {
+  iataCode: string;
+  latitude: number;
+  longitude: number;
+}
+
+/** Airports passed to the factories, keyed by city slug. Absent => fall back. */
+export type AirportIndex = Map<string, SeedAirport[]>;
+
+let AIRPORTS_BY_CITY: AirportIndex = new Map();
+
+/**
+ * Supplies the real airports used to build flight routes.
+ *
+ * Call once before `buildGlobalProducts`. Without it the flight factory falls
+ * back to deriving a departure from the city's own country hub, which is
+ * weaker but still never produces a degenerate route.
+ */
+export function setAirportsByCity(index: AirportIndex): void {
+  AIRPORTS_BY_CITY = index;
+}
+
 function flightProduct(city: CityDescriptor): SeedProduct {
   const seed = `flight:${city.slug}`;
   const country = (city.slug.match(/-([a-z]{2})$/) ? city.slug.slice(-2) : 'GB').toUpperCase();
   const carriers = FLIGHT_CARRIERS[country] ?? ['Emirates'];
   const airline = pick(carriers, seed);
   const hub = pick(HUBS[country] ?? ['SIN'], seed + 'hub');
-  const origin = pick(HUBS[country] ?? ['SIN'], seed + 'origin');
+
+  /**
+   * Departure airport, derived from real geography.
+   *
+   * Previously `origin` was picked from the same `HUBS` pool as `hub`, so the
+   * two could coincide and the catalogue grew products like `JFK → JFK` — seven
+   * of the 34 flights. Any second fixed list would drift from the first; using
+   * the city's own nearest airport removes the possibility instead of
+   * narrowing it.
+   *
+   * Falls back to a hub from the same country when no airport has been
+   * supplied (the import has not been run), because a weaker route is better
+   * than an impossible one.
+   */
+  const nearby = AIRPORTS_BY_CITY.get(city.slug);
+  const origin = nearby?.length
+    ? nearby[hash(seed + 'origin') % nearby.length].iataCode
+    : pick(HUBS[country] ?? ['SIN'], seed + 'origin');
+
+  /**
+   * Guarantee the two ends differ.
+   *
+   * The departure now comes from geography and the arrival from `HUBS`, so a
+   * collision is only possible when the city's nearest airport is itself a
+   * listed hub — which is exactly the `DXB → DXB` case. Rather than reaching
+   * for another hub (and landing in the same trap), pick the next-nearest real
+   * airport, because a flight from DXB to DXB does not exist.
+   */
+  let destination = hub;
+  if (destination === origin && nearby && nearby.length > 1) {
+    const alternative = nearby.find((a) => a.iataCode !== origin);
+    if (alternative) destination = alternative.iataCode;
+  }
+  // Last resort: a different hub entirely. Better a long route than no route.
+  if (destination === origin) {
+    destination = (HUBS[country] ?? ['SIN']).find((code) => code !== origin) ?? 'SIN';
+  }
 
   /**
    * A share of the catalogue is sold as a one-stop itinerary rather than a
@@ -313,10 +384,13 @@ function flightProduct(city: CityDescriptor): SeedProduct {
   // flights pick DXB as their hub, so without it the "change of gauge" produced
   // routes like `JFK → DXB → DXB` — a stop that departs where it arrived.
   const connects =
-    hash(seed + 'via') % 3 === 0 && origin !== hub && origin !== CONNECT_HUB && hub !== CONNECT_HUB;
-  const route = connects ? `${origin} → ${CONNECT_HUB} → ${hub}` : `${origin} → ${hub}`;
-  const cabinLabel = fill(pick(FLIGHT_NAMES.en, seed), { hub, city: city.name });
-  const cabinLabelZh = fill(pick(FLIGHT_NAMES.zh, seed), { hub, city: city.nameZh });
+    hash(seed + 'via') % 3 === 0 &&
+    origin !== destination &&
+    origin !== CONNECT_HUB &&
+    destination !== CONNECT_HUB;
+  const route = connects ? `${origin} → ${CONNECT_HUB} → ${destination}` : `${origin} → ${destination}`;
+  const cabinLabel = fill(pick(FLIGHT_NAMES.en, seed), { hub: destination, city: city.name });
+  const cabinLabelZh = fill(pick(FLIGHT_NAMES.zh, seed), { hub: destination, city: city.nameZh });
   const { lat, lng } = offset(city, seed);
 
   // Business is the headline fare — that is the segment a premium agency sells.

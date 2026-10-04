@@ -324,6 +324,25 @@ function cabinCategoriesFor(product: Product): Json[] {
  * @returns the table written, or null when the type has no extension or a row
  * already exists (so a re-run never clobbers data a feed has populated).
  */
+/**
+ * A comparable fingerprint of an itinerary: the airports, in order.
+ *
+ * Comparing `segmentCount` alone cannot tell `HKG → HKG` from `HKG → SIN` — both
+ * are one leg — so a corrected route reads as unchanged and the stale
+ * `FlightSegment` rows survive. This is the string the two blobs are judged on.
+ */
+function routeSignature(segments: unknown): string {
+  if (!Array.isArray(segments)) return '';
+  return segments
+    .map((entry) => {
+      const leg = entry as JsonSegment;
+      const from = leg.departure?.airport ?? '';
+      const to = leg.arrival?.airport ?? '';
+      return `${from}>${to}`;
+    })
+    .join('|');
+}
+
 async function backfillOne(prisma: PrismaClient, product: Product): Promise<string | null> {
   switch (product.type) {
     case 'HOTEL_ROOM': {
@@ -368,9 +387,18 @@ async function backfillOne(prisma: PrismaClient, product: Product): Promise<stri
         //
         // Only the shape of the journey is refreshed. `ticketingRules` and
         // `cabins` are left alone because a supplier feed owns those.
-        if (existing.segmentCount === segments.length && existing.marketingCarrier === marketingCarrier) {
-          return null;
-        }
+        //
+        // The comparison covers the airports, not just the leg count. `HKG → HKG`
+        // and `HKG → SIN` are both a single leg, so comparing lengths reported
+        // them as identical and left the stale itinerary in place — which is how
+        // three `FlightSegment` rows ended up saying `HKG → HKG` for a product
+        // whose route read `HKG → SIN`.
+        const sameRoute =
+          existing.segmentCount === segments.length &&
+          existing.marketingCarrier === marketingCarrier &&
+          routeSignature(existing.segments) === routeSignature(segments);
+
+        if (sameRoute) return null;
         await prisma.productFlight.update({
           where: { productId: product.id },
           data: {
@@ -560,11 +588,19 @@ async function backfillFlightSegments(prisma: PrismaClient): Promise<number> {
       });
 
     // Never clobber a richer schedule a feed has filled in: if the stored rows
-    // already carry times the blob does not, leave them alone.
+    // already carry times the blob does not, and the airports already agree,
+    // leave them alone.
     const storedHasSchedule = existing.some((row) => row.departureScheduledAt !== null);
     const blobHasSchedule = rows.some((row) => row.departureScheduledAt !== null);
     if (matches && !(blobHasSchedule && !storedHasSchedule)) continue;
-    if (!matches && !storedHasSchedule && !blobHasSchedule) continue;
+
+    // Anything else is rewritten, including a route change on a product whose
+    // itinerary carries no times at all. An earlier draft skipped when both
+    // sides were schedule-less, which is precisely the case that let `HKG → HKG`
+    // rows survive under a product whose route read `HKG → SIN`: the airport
+    // comparison below said "different", and this said "nothing to preserve".
+    // Preserving a schedule is the only reason to skip, so that is the only
+    // reason to skip.
 
     await prisma.flightSegment.deleteMany({ where: { productId: flight.productId } });
     await prisma.flightSegment.createMany({ data: rows });
