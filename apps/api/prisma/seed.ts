@@ -42,6 +42,7 @@ import { DESTINATIONS, MERCHANTS, type SeedDestination, type SeedPriceRule, type
 import { COUPONS, PRODUCTS } from './seed-products';
 import { backfillCategoryExtensions } from './seed-category-extensions';
 import { seedBundles } from './seed-bundles';
+import { reindexAll } from '../src/modules/search/service';
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -525,6 +526,18 @@ async function main() {
   //    existed.
   // -------------------------------------------------------------------------
   await backfillCategoryData();
+
+  // 11. Rebuild the denormalised search index.
+  //
+  //     `reindexAll` existed and was never called from anywhere. Search reads
+  //     `ProductSearchBlob`, which the seed writes once and never refreshes, so
+  //     any product field the seed later corrects stayed wrong for search: a
+  //     flight reseeded from `SIN → JFK` to `SIN → DXB → JFK` was still
+  //     indexed as direct, and `?q=london-international-flight` returned zero
+  //     hits for a product that plainly existed.
+  // ---------------------------------------------------------------------------
+  const reindexed = await reindexAll();
+  logger.info('seed.search_reindexed', { products: reindexed });
 
   logger.info('seed.done');
 }
