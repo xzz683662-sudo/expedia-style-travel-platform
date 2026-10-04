@@ -1835,15 +1835,14 @@ model ProductFlight {
   /// Number of sectors on the default itinerary, cached for cheap filtering.
   segmentCount Int @default(1)
 
-  /// Ordered legs. Each entry:
-  /// { seq, marketingCarrier, operatingCarrier?, flightNumber, aircraft,
-  ///   departure: { airport, terminal?, scheduledAt, actualAt?, offset },
-  ///   arrival:   { airport, terminal?, scheduledAt, actualAt?, offset },
-  ///   durationMinutes, cabinCode, bookingClass, fareFamily }
+  /// Ordered legs. Each entry mirrors a `FlightSegment` row for the default
+  /// itinerary, and is kept in step by the backfill.
   ///
-  /// Ordered segments genuinely need sequence and cross-leg queries, which a
-  /// Json blob makes awkward to index. This is the first candidate for a real
-  /// `FlightSegment` table if itinerary search or rebooking lands.
+  /// The Json copy exists so a product detail read never needs a join, and so an
+  /// itinerary survives if the segment rows are re-derived. `FlightSegment` is
+  /// the queryable copy: connection and stopover search needs to filter on
+  /// arrival/departure airports and layover length, which a Json blob cannot
+  /// index. Read through the table, not this field.
   segments Json @default("[]")
 
   /// Sellable fare families. Each entry:
@@ -1862,6 +1861,68 @@ model ProductFlight {
 
   @@index([marketingCarrier])
   @@index([segmentCount])
+
+  /// Queryable itinerary legs. `segments` above is the same data denormalised
+  /// for single-row reads; this relation is what connection search queries.
+  itinerary FlightSegment[]
+}
+
+/// One leg of a flight's default itinerary, as a row rather than Json.
+///
+/// Two questions make this worth a table. "Which flights connect through HKG?"
+/// needs to match on a departure or arrival airport that is neither the origin
+/// nor the destination of the product. "Which itineraries have a 3-hour
+/// layover at LHR?" needs to subtract one arrival from the next departure.
+/// Neither is expressible against a Json blob without scanning and parsing every
+/// product in Postgres, and neither can be pushed down to OpenSearch.
+///
+/// Times are stored in UTC. `scheduledAt` is what the airline published;
+/// `actualAt` is filled by the operating carrier after the fact and stays null
+/// for a schedule that has not flown yet. An airport without an offset in the
+/// seed carries a null time rather than a guessed one.
+model FlightSegment {
+  id String @id @default(cuid())
+
+  productId String
+  product   ProductFlight @relation(fields: [productId], references: [productId], onDelete: Cascade)
+
+  /// 1-based position in the itinerary. Unique per product so an itinerary
+  /// cannot contain two indistinguishable legs at the same position.
+  seq Int
+
+  marketingCarrier String
+  operatingCarrier String?
+  /// 2-letter IATA of the marketing carrier, when the carrier table knows it.
+  /// Indexable shorthand for `marketingCarrier`, which may hold a full name.
+  marketingCarrierCode String?
+  flightNumber     String?
+  aircraft         String?
+
+  departureAirport     String
+  departureTerminal    String?
+  departureScheduledAt DateTime?
+  departureActualAt    DateTime?
+
+  arrivalAirport     String
+  arrivalTerminal    String?
+  arrivalScheduledAt DateTime?
+  arrivalActualAt    DateTime?
+
+  /// Scheduled block time in minutes. Null when the schedule has no times yet:
+  /// deriving it from two null timestamps would invent precision.
+  durationMinutes Int?
+  cabinCode       String?
+  bookingClass    String?
+  fareFamily      String?
+
+  @@unique([productId, seq])
+  @@index([productId])
+  @@index([departureAirport])
+  @@index([arrivalAirport])
+  @@index([marketingCarrierCode])
+  /// Serves "connections through this airport": a layover is an arrival at one
+  /// segment and a departure from the next, so both airports must be indexed.
+  @@index([departureAirport, arrivalAirport])
 }
 
 /// Cruise: one sailing of a ship, including its port itinerary and cabins.

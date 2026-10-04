@@ -475,12 +475,26 @@ export async function markSoldOutIfEmpty(
 /**
  * Availability across a date window, used by the calendar picker on the
  * detail page. Returns a status and the cheapest price per day.
+ *
+ * `availableQty` is the sum across ticket types, which is what a browser wants
+ * for "how busy is this day" — but it must not be read as "this many of *any*
+ * option can be booked". Summing hides exhaustion in one option: a hotel with
+ * capacities 18 / 6 / 2 whose cheap type is sold out still totals 26, so the
+ * calendar says AVAILABLE, the customer picks that option, and checkout answers
+ * INVENTORY_UNAVAILABLE. `byTicketType` carries the per-option truth so a caller
+ * that is about to book a *specific* option can check it first.
  */
 export async function getAvailabilityCalendar(params: {
   productId: string;
   from: Date;
   to: Date;
-}): Promise<{ date: string; status: string; availableQty: number; minPriceCents: number }[]> {
+}): Promise<{
+  date: string;
+  status: string;
+  availableQty: number;
+  minPriceCents: number;
+  byTicketType: { ticketTypeId: string; available: number }[];
+}[]> {
   await releaseExpiredHolds(50);
 
   const ticketTypes = await prisma.ticketType.findMany({
@@ -497,23 +511,34 @@ export async function getAvailabilityCalendar(params: {
   });
 
   const priceByType = new Map(ticketTypes.map((t) => [t.id, t.basePriceCents]));
-  const byDate = new Map<string, { available: number; minPrice: number }>();
+  const byDate = new Map<
+    string,
+    { available: number; minPrice: number; perType: Map<string, number> }
+  >();
 
   for (const record of records) {
     if (record.status === InventoryStatus.CLOSED) continue;
 
     const available = sellable({ ...record, inventoryMode: InventoryMode.PER_DATE });
-    if (available <= 0) continue;
 
     const key = formatServiceDate(record.serviceDate);
     const existing = byDate.get(key);
     const price = priceByType.get(record.ticketTypeId) ?? 0;
 
     if (existing) {
+      // A CLOSED or exhausted option contributes 0 rather than being skipped:
+      // skipping it would drop the type out of `byTicketType` entirely, and a
+      // caller checking "can I book type X on this date" would read a missing
+      // entry as "unknown" instead of "no".
+      existing.perType.set(record.ticketTypeId, available);
       existing.available += available;
       existing.minPrice = Math.min(existing.minPrice, price);
     } else {
-      byDate.set(key, { available, minPrice: price });
+      byDate.set(key, {
+        available,
+        minPrice: price,
+        perType: new Map([[record.ticketTypeId, available]]),
+      });
     }
   }
 
@@ -523,6 +548,10 @@ export async function getAvailabilityCalendar(params: {
       status: value.available >= 10 ? 'AVAILABLE' : 'LIMITED',
       availableQty: value.available,
       minPriceCents: value.minPrice,
+      byTicketType: [...value.perType.entries()].map(([ticketTypeId, available]) => ({
+        ticketTypeId,
+        available,
+      })),
     }))
     .sort((a, b) => a.date.localeCompare(b.date));
 }

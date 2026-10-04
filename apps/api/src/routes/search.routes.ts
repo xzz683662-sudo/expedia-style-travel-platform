@@ -5,6 +5,7 @@ import { config } from '../config/env';
 import { prisma } from '../lib/prisma';
 import { resolveLocale } from '../plugins/auth';
 import { TYPE_LABELS, searchProducts, typeLabel } from '../modules/search/service';
+import { findFlightsConnectingThrough, summariseConnectionPoints } from '../modules/search/connections';
 import { AppError } from '../utils/errors';
 
 const listSchema = z.object({
@@ -231,4 +232,81 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
 
     return { ...result, title: collection.title };
   });
+
+  /**
+   * Flights that connect through an airport.
+   *
+   * `requireChange=true` is the difference between "flights to HKG" and
+   * "flights via HKG" — without it the first leg of any HKG departure counts as
+   * a connection, which is true but useless.
+   */
+  app.get('/search/connections', async (request) => {
+    const params = z
+      .object({
+        airport: z.string().trim().min(2).max(4),
+        requireChange: z.coerce.boolean().default(false),
+        maxDurationMinutes: z.coerce.number().int().positive().max(60 * 48).optional(),
+        minLayoverMinutes: z.coerce.number().int().min(0).max(60 * 24).optional(),
+        maxLayoverMinutes: z.coerce.number().int().min(0).max(60 * 24).optional(),
+        limit: z.coerce.number().int().positive().max(50).default(20),
+      })
+      .refine(
+        (value) =>
+          value.minLayoverMinutes === undefined ||
+          value.maxLayoverMinutes === undefined ||
+          value.minLayoverMinutes <= value.maxLayoverMinutes,
+        { message: 'minLayoverMinutes must not exceed maxLayoverMinutes' },
+      )
+      .parse(request.query);
+
+    const itineraries = await findFlightsConnectingThrough(params);
+
+    // Products carry the commercial terms the itinerary alone does not: price,
+    // cabin and cancellation. A leg list without them is not bookable, so the
+    // two are joined here rather than making the caller do it.
+    const products = await prisma.product.findMany({
+      where: { id: { in: itineraries.map((itinerary) => itinerary.productId) } },
+      select: {
+        id: true,
+        slug: true,
+        summary: true,
+        airlineName: true,
+        flightRoute: true,
+        cabinClass: true,
+        ratingAvg: true,
+        ratingCount: true,
+        freeCancellation: true,
+        instantConfirm: true,
+        ticketTypes: { where: { active: true }, orderBy: { basePriceCents: 'asc' }, take: 1, select: { basePriceCents: true, currency: true } },
+        destination: { select: { slug: true, name: true, countryCode: true } },
+      },
+    });
+    const byId = new Map(products.map((product) => [product.id, product]));
+
+    return {
+      airport: params.airport.toUpperCase(),
+      requireChange: params.requireChange,
+      total: itineraries.length,
+      items: itineraries
+        .map((itinerary) => {
+          const product = byId.get(itinerary.productId);
+          // A segment row can outlive its product if the product was deleted
+          // outside a cascade; skipping keeps the list self-consistent.
+          if (!product) return null;
+          const cheapest = product.ticketTypes[0] ?? null;
+          const { ticketTypes, ...rest } = product;
+          return {
+            ...rest,
+            priceCents: cheapest?.basePriceCents ?? null,
+            currency: cheapest?.currency ?? null,
+            itinerary: itinerary.legs,
+            layoversMinutes: itinerary.layoversMinutes,
+          };
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null),
+    };
+  });
+
+  /** Where itineraries actually change aircraft, for a connection picker. */
+  app.get('/search/connections/points', async () => ({ items: await summariseConnectionPoints() }));
 }

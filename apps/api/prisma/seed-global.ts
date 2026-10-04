@@ -276,6 +276,17 @@ function fill(template: string, values: Record<string, string>): string {
   return template.replace(/\{(\w+)\}/g, (all, key: string) => values[key] ?? all);
 }
 
+/**
+ * Hub used to build one-stop itineraries in {@link flightProduct}.
+ *
+ * DXB because the seed carriers (Emirates in particular) actually operate it as
+ * a Gulf hub, so a change of gauge there is not fiction. Kept as a named
+ * constant because `CONNECTING_ITINERARIES` in seed-category-extensions.ts
+ * spells out the leg times for this same hub; the two must agree or the seed
+ * produces an itinerary with no schedule behind it.
+ */
+const CONNECT_HUB = 'DXB';
+
 function flightProduct(city: CityDescriptor): SeedProduct {
   const seed = `flight:${city.slug}`;
   const country = (city.slug.match(/-([a-z]{2})$/) ? city.slug.slice(-2) : 'GB').toUpperCase();
@@ -283,7 +294,27 @@ function flightProduct(city: CityDescriptor): SeedProduct {
   const airline = pick(carriers, seed);
   const hub = pick(HUBS[country] ?? ['SIN'], seed + 'hub');
   const origin = pick(HUBS[country] ?? ['SIN'], seed + 'origin');
-  const route = `${origin} → ${hub}`;
+
+  /**
+   * A share of the catalogue is sold as a one-stop itinerary rather than a
+   * direct hop.
+   *
+   * Without this every flight product is a single leg, so the connection
+   * endpoints (`/api/v1/search/connections`) have nothing to match and answer
+   * `[]` for every airport. That is a truthful answer to an empty question, not
+   * a working feature.
+   *
+   * The routing is deterministic per product seed, and the change of gauge at
+   * the hub is a real one-stop pattern on these trunks — but the leg times come
+   * from `CONNECTING_ITINERARIES`, which is demo inventory rather than a live
+   * schedule. A customer-facing PNR must never be built from it.
+   */
+  // `hub !== CONNECT_HUB` matters as much as `origin !== CONNECT_HUB`: UK
+  // flights pick DXB as their hub, so without it the "change of gauge" produced
+  // routes like `JFK → DXB → DXB` — a stop that departs where it arrived.
+  const connects =
+    hash(seed + 'via') % 3 === 0 && origin !== hub && origin !== CONNECT_HUB && hub !== CONNECT_HUB;
+  const route = connects ? `${origin} → ${CONNECT_HUB} → ${hub}` : `${origin} → ${hub}`;
   const cabinLabel = fill(pick(FLIGHT_NAMES.en, seed), { hub, city: city.name });
   const cabinLabelZh = fill(pick(FLIGHT_NAMES.zh, seed), { hub, city: city.nameZh });
   const { lat, lng } = offset(city, seed);

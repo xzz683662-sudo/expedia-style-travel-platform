@@ -70,7 +70,7 @@ pnpm workspace (`pnpm-workspace.yaml`, `pnpm-lock.yaml`). Root `package.json` ho
   Seed via the real issuer, plus the `backfillTicketArtifacts()` self-heal for old rows.
 - Tickets are written under `apps/api/storage/tickets/TKT-XXXX-XXXX-XXXX/`.
 
-### i18n (`apps/web/src/lib/dictionaries.ts`)
+### i18n (`apps/web/src/lib/i18n/dictionaries.ts`)
 - `as const` on the `en` dictionary freezes literals and produces hundreds of type errors in `zh`.
   Recursive mapped types are worse (TS2536/TS2322/TS2345).
   The only working shape: **no `as const` on `en`**, **no type annotation on `zh`**, validated by
