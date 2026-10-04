@@ -6,6 +6,7 @@ import { prisma } from '../lib/prisma';
 import { resolveLocale } from '../plugins/auth';
 import { TYPE_LABELS, searchProducts, typeLabel } from '../modules/search/service';
 import { findFlightsConnectingThrough, summariseConnectionPoints } from '../modules/search/connections';
+import { realtimeFlights } from '../modules/supply/realtime-flight';
 import { AppError } from '../utils/errors';
 
 const listSchema = z.object({
@@ -417,6 +418,36 @@ export async function searchRoutes(app: FastifyInstance): Promise<void> {
     });
 
     return { airport, sources: records };
+  });
+
+  /**
+   * Live flight positions, fetched in real time from community ADS-B sources —
+   * see `docs/supply-sources.md` ("Real-time sources"). Unlike the import
+   * registry these adapters never write a row: positions are seconds-fresh and
+   * ephemeral, so they live in a 30s Redis cache and nowhere else. The source
+   * that answered travels on every item, so provenance is visible without
+   * being persisted.
+   */
+  app.get('/search/flights/live', async (request) => {
+    const params = z
+      .object({
+        lat: z.coerce.number().min(-90).max(90),
+        lng: z.coerce.number().min(-180).max(180),
+        radiusNm: z.coerce.number().int().min(1).max(250).default(25),
+      })
+      .parse(request.query);
+
+    return { items: await realtimeFlights.near(params.lat, params.lng, params.radiusNm) };
+  });
+
+  app.get('/search/flights/:callsign/live', async (request) => {
+    const { callsign } = z
+      .object({ callsign: z.string().trim().toUpperCase().regex(/^[A-Z0-9]{3,8}$/) })
+      .parse(request.params);
+
+    const flight = await realtimeFlights.byCallsign(callsign);
+    if (!flight) throw AppError.notFound('Live flight');
+    return { flight };
   });
 }
 

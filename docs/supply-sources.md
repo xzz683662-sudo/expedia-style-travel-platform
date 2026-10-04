@@ -91,6 +91,54 @@ with no inventory of its own.
 - ODbL (OSM, OpenFlights) is share-alike: derived database must be redistributed
   under ODbL. Prefer Overture / FSQ / OurAirports where a permissive license fits.
 
+## Real-time sources
+
+A second kind of source, deliberately separate from the import registry above:
+live query APIs that answer "where is this aircraft right now" and **never write
+a row**. Positions are seconds-fresh and ephemeral — they live in a 30s Redis
+cache and nowhere else, so no Prisma model, no seed, and no provenance table is
+involved. Because nothing is stored or redistributed, upstream licence terms are
+consumed transiently; **verify a source's terms before ever persisting or
+redistributing its data.**
+
+Adapter: `apps/api/src/modules/supply/realtime-flight.ts` (enumerated chain,
+first source that answers wins, per-source failure falls through, all sources
+down → 503). Read API: `GET /api/v1/search/flights/live?lat=&lng=&radiusNm=`
+and `GET /api/v1/search/flights/:callsign/live`.
+
+Every source below was probed live on **2026-10-04** before being wired in,
+per the freshness rule above.
+
+| id | data | endpoint | auth | verified |
+| --- | --- | --- | --- | --- |
+| `adsb-lol` | live ADS-B positions, registration, type, squawk | `api.adsb.lol/v2/callsign/{cs}`, `/v2/point/{lat}/{lon}/{radiusNm≤250}` | none | HTTP 200, second-level fresh traffic around London |
+| `opensky-network` | live ADS-B state vectors | `opensky-network.org/api/states/all?lamin=…` (bbox) | none (anonymous quota) | HTTP 200, fresh bbox traffic; **fallback only** |
+| `adsbdb` | registration → aircraft type, owner, photo | `api.adsbdb.com/v0/aircraft/{reg}` | none | HTTP 200 (`G-XLEA` → A380-841, British Airways); candidate, not wired |
+
+Evaluated and **not** wired:
+
+- `airplanes.live` — HTTP 403; access requires emailing them a project
+  description first. Revisit if a second radius source is ever needed.
+- `aviationstack` — alive but key-gated; the free tier is too small to be a
+  dependable fallback.
+
+Verified quirks that shape the chain:
+
+- **OpenSky's anonymous `/states/all` ignores its `callsign` parameter.** The
+  2026-10-04 probe with `?callsign=DAL112` returned unfiltered global states
+  (Utah, India), not the requested flight. A fallback that returns the wrong
+  aircraft is worse than no fallback, so OpenSky does not participate in the
+  by-callsign chain — `adsb-lol` serves it alone, and its `/v2/callsign/{cs}`
+  endpoint was verified to filter correctly.
+- OpenSky answers a bounding *square*; the API contract is a circle, so the
+  adapter applies a great-circle filter after the bbox query.
+- adsb.lol's `alt_baro` is feet *or* the string `"ground"` — the normaliser
+  branches on the type rather than trusting the number.
+
+Real-time positions never feed pricing or inventory. Schedule, fare and seat
+inventory remain governed by the rule above: they cannot come from open data,
+and the pricing/inventory engines derive them.
+
 ## Interface
 
 `apps/api/src/modules/supply/source.ts` defines `SupplySource`. One adapter per row
