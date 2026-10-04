@@ -134,6 +134,11 @@ Verified quirks that shape the chain:
   adapter applies a great-circle filter after the bbox query.
 - adsb.lol's `alt_baro` is feet *or* the string `"ground"` — the normaliser
   branches on the type rather than trusting the number.
+- adsb.lol refuses the runtime's default `User-Agent` (`node`) with HTTP 403
+  "User-Agent too generic; include valid contact info" (verified 2026-10-04).
+  The adapter therefore sends a project-identifying UA on every request;
+  without it the primary source is unreachable and every query silently
+  degrades to OpenSky's anonymous quota.
 
 Real-time positions never feed pricing or inventory. Schedule, fare and seat
 inventory remain governed by the rule above: they cannot come from open data,

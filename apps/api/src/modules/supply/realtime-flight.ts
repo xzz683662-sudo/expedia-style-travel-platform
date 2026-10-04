@@ -72,8 +72,21 @@ export interface RealtimeFlightSource {
 
 const FETCH_TIMEOUT_MS = 8_000;
 
+/**
+ * adsb.lol refuses the runtime's default User-Agent (`node`) with HTTP 403
+ * "User-Agent too generic; include valid contact info" — verified live
+ * 2026-10-04 — so every request identifies the client. Without this the
+ * primary source is dead on arrival: `near` silently degrades to OpenSky's
+ * scarce anonymous quota and `byCallsign` has no source left at all.
+ */
+const USER_AGENT =
+  'easytrip-api/0.1.0 (+https://github.com/ayan1666668-ops/expedia-style-travel-platform)';
+
 async function fetchJson(url: string): Promise<unknown> {
-  const response = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+  const response = await fetch(url, {
+    headers: { 'User-Agent': USER_AGENT },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
   if (!response.ok) {
     throw new Error(`${url} responded ${response.status}`);
   }
@@ -102,17 +115,24 @@ export class AdsbLolSource implements RealtimeFlightSource {
       ac?: AdsbLolAircraft[];
     };
     const aircraft = payload.ac?.[0];
-    return aircraft ? [aircraft].map((row) => this.normalise(row))[0] : null;
+    return aircraft ? this.normalise(aircraft) : null;
   }
 
   async near(lat: number, lon: number, radiusNm: number): Promise<LiveFlight[]> {
     const payload = (await fetchJson(
       `${this.baseUrl}/point/${lat}/${lon}/${Math.min(radiusNm, this.maxRadiusNm)}`,
     )) as { ac?: AdsbLolAircraft[] };
-    return (payload.ac ?? []).map((row) => this.normalise(row));
+    return (payload.ac ?? [])
+      .map((row) => this.normalise(row))
+      .filter((flight) => flight !== null);
   }
 
-  private normalise(row: AdsbLolAircraft): LiveFlight {
+  private normalise(row: AdsbLolAircraft): LiveFlight | null {
+    // A record without a position fix is unusable: the API contract requires
+    // numbers here, and silently emitting `undefined` coordinates would
+    // corrupt every consumer that trusts the shape. Same rule as the OpenSky
+    // normaliser below — drop the row rather than guess.
+    if (typeof row.lat !== 'number' || typeof row.lon !== 'number') return null;
     const onGround = row.alt_baro === 'ground';
     return {
       icao24: (row.hex ?? '').toLowerCase(),
@@ -241,6 +261,13 @@ type OpenSkyState = [
  */
 
 const CACHE_TTL_SECONDS = 30;
+/**
+ * A verified-empty area (mid-ocean, quiet airspace) is also an answer. Caching
+ * it briefly keeps repeated identical queries from punching through the chain
+ * to the fallback's scarce anonymous quota, while staying fresh enough that a
+ * aircraft entering the area is seen within seconds.
+ */
+const EMPTY_CACHE_TTL_SECONDS = 10;
 const CACHE_PREFIX = 'rt:flight';
 
 export class RealtimeFlightFinder {
@@ -290,6 +317,11 @@ export class RealtimeFlightFinder {
     if (errors.length === this.sources.length && this.sources.length > 0) {
       throw new AppError(503, 'INTERNAL', 'No realtime flight source is reachable right now');
     }
+    // Every source answered but found nothing — cache the empty result so the
+    // next identical query doesn't walk the chain again (see
+    // `EMPTY_CACHE_TTL_SECONDS`). An empty array is truthy, so the cache-hit
+    // check above returns it unchanged.
+    await cacheSet(key, [] as LiveFlight[], EMPTY_CACHE_TTL_SECONDS);
     return [];
   }
 }

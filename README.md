@@ -367,7 +367,8 @@ Base URL `/api/v1`. Auth via `Authorization: Bearer <token>`.
 
 **Discovery** — `GET /search`, `/destinations`, `/collections/:slug`,
 `/search/connections`, `/search/connections/points`,
-`/search/airports`, `/search/airports/:iata/source`
+`/search/airports`, `/search/airports/:iata/source`,
+`/search/flights/live`, `/search/flights/:callsign/live`
 Category facet filters: `stars`, `carriers`, `carrierCodes`, `ships`,
 `destinationPorts`, `boardBasis` (comma-separated). Values
 outside the valid range are dropped rather than rejected, so a bad chip value degrades to
@@ -387,6 +388,13 @@ empty rather than fabricated when no product has a second leg.
 `/search/airports/:iata/source` returns the provenance and licence of an
 imported row, so attribution is answerable from the data. See
 [`docs/supply-sources.md`](./docs/supply-sources.md).
+
+`/search/flights/live?lat=&lng=&radiusNm=` and
+`/search/flights/:callsign/live` answer "where is this aircraft right now"
+from community ADS-B networks. These are live queries, never imports:
+positions live in a short cache and are never persisted, and the source that
+answered travels on every item. See
+[`docs/supply-sources.md`](./docs/supply-sources.md) ("Real-time sources").
 **Products** — `GET /products/:slug`, `/products/:slug/availability`, `/products/:slug/nearby`
 **Auth** — `POST /auth/register`, `/auth/login`; `GET|PATCH /auth/me`; `POST /auth/travelers`
 **Orders** — `POST /orders`, `GET /orders`, `/orders/:id`, `/orders/lookup`,
