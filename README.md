@@ -364,10 +364,20 @@ The support console is deliberately narrower than admin:
 
 Base URL `/api/v1`. Auth via `Authorization: Bearer <token>`.
 
-**Discovery** — `GET /search`, `/destinations`, `/collections/:slug`
-Category facet filters: `stars`, `carriers`, `ships`, `boardBasis` (comma-separated). Values
+**Discovery** — `GET /search`, `/destinations`, `/collections/:slug`,
+`/search/connections`, `/search/connections/points`
+Category facet filters: `stars`, `carriers`, `carrierCodes`, `ships`,
+`destinationPorts`, `boardBasis` (comma-separated). Values
 outside the valid range are dropped rather than rejected, so a bad chip value degrades to
 "no filter" instead of a 4xx.
+
+`/search/connections?airport=DXB&requireChange=true` answers "which itineraries
+stop at DXB" from the `FlightSegment` table, with optional `minLayoverMinutes`
+/ `maxLayoverMinutes` / `maxDurationMinutes`. `requireChange` is what separates
+*via* DXB from *to* DXB — without it the first leg of every DXB departure counts
+as a connection. `/search/connections/points` summarises every intermediate
+airport the catalogue actually routes through, with the median layover. It is
+empty rather than fabricated when no product has a second leg.
 **Products** — `GET /products/:slug`, `/products/:slug/availability`, `/products/:slug/nearby`
 **Auth** — `POST /auth/register`, `/auth/login`; `GET|PATCH /auth/me`; `POST /auth/travelers`
 **Orders** — `POST /orders`, `GET /orders`, `/orders/:id`, `/orders/lookup`,
@@ -406,7 +416,7 @@ Operations: `GET /health`, `GET /ready` (per-dependency readiness).
 ## Testing
 
 ```bash
-bash scripts/smoke-test.sh    # 84 checks, requires both services running
+bash scripts/smoke-test.sh    # 90 checks, requires both services running
 bash scripts/mobile-check.sh  # 40 checks, responsive layer regression guard
 bash scripts/schema-audit.sh  # finds columns a seed writes but no route reads
 pnpm typecheck                # strict TS across api + web
