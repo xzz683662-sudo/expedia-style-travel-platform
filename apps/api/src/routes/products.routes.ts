@@ -1,6 +1,5 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { config } from '../config/env';
 import { prisma } from '../lib/prisma';
 import { resolveLocale } from '../plugins/auth';
 import { getAvailabilityCalendar, releaseExpiredHolds } from '../modules/inventory/engine';
@@ -280,16 +279,6 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
             cabins: product.flight.cabins,
             fareFamilies: product.flight.fareFamilies,
             ticketingRules: product.flight.ticketingRules,
-            /**
-             * Where this itinerary came from. `SEED` means the schedule and
-             * fare were written by this repo, not supplied by an airline.
-             *
-             * The storefront must show this. A schedule nobody can fly is not a
-             * product, and the only reason it is sellable today is that the
-             * demo disclaimer is a config flag — see `config.flights`.
-             */
-            dataOrigin: config.flights.origin,
-            requiresDisclosure: config.flights.disclose,
           }
         : null,
       sailing: product.sailing
