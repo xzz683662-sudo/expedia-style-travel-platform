@@ -29,7 +29,9 @@
 
 `robots.txt` 的 `user-agent: *` 段明确 `disallow` 了**所有搜索 URL**：
 
-```
+**实测 `robots.txt` 中的相关条目：**
+
+```text
 disallow: /search?
 disallow: /*/search?
 disallow: /Hotel-Search
@@ -44,7 +46,7 @@ lodging ranking 系列）**无法也无需复用**。
 
 真正可用的公开面是 **SEO 落地页**，而且它是**对 AI 爬虫显式开放的**：
 
-```
+```text
 user-agent: Claude-User  /  Claude-SearchBot
 user-agent: OAI-SearchBot  /  ChatGPT-User
 user-agent: PerplexityBot  /  Perplexity-User
@@ -66,7 +68,7 @@ allow: /
 
 用 `Claude-User` 取回的酒店页，实测统计：
 
-```
+```text
 script tags : 0      ← 零 <script>，不是 SPA shell
 ld+json     : 0      ← 没有 JSON-LD
 data-testid : 156    ← 但 SSR 出了完整的稳定选择器
@@ -74,7 +76,7 @@ data-testid : 156    ← 但 SSR 出了完整的稳定选择器
 
 `data-testid` 是**给测试用的契约**，因此比 class 名稳定得多。可以直接抽取：
 
-```
+```text
 hotel-name        : 6 条  ["ibis budget Paris Porte de Montmartre", ...]
 hotelcard-link-*  : 6 条  ["/Paris-Hotels-Ibis-Budget-...-Montmartre.h12475466.Hotel-Information", ...]
 nightly-price     : 6 条  ["$59 nightly", "$67 nightly", ...]
@@ -102,7 +104,7 @@ star-rating-links-full-bleed-image-card-0..3
 
 实测 `SearchDocument` 上的 facet 列确实**有值**：
 
-```
+```text
 SearchDocument total = 230
   carrierCode  not null : 34      starRating  not null : 34
   shipName     not null : 34      routeSummary not null: 34
@@ -155,7 +157,7 @@ category: {
 做法：人工把一行 `carrierCode` 改成 `'ZZ'`、`routeSummary` 改成 `'PROBE'`，
 再调一次 `indexProduct()`（`reindexAll()` 就是循环调它）：
 
-```
+```text
 初始      : BA | SIN → JFK
 人为标记后: ZZ | PROBE
 reindex后 : ZZ | PROBE     ← 标记存活
@@ -188,7 +190,7 @@ keywords: [...product.tags.map((t) => t.label), ...localizedCopy]
 实测：`keywords` 数组元素里**含空格的多词短语占绝大多数**，
 而 `has` 要求整个元素**相等**：
 
-```
+```text
 keywords 元素共 N 个，其中含空格的多词短语 M 个
 ```
 
@@ -197,7 +199,7 @@ keywords 元素共 N 个，其中含空格的多词短语 M 个
 
 **但这一条被 `body` 兜住了**，这是实测结论，不是推测：
 
-```
+```text
 q="private guide"  hits=37      ← 由 body 的 contains 命中
 q="guide"          hits=87
 q="巴黎"            hits=5
@@ -210,7 +212,7 @@ q="维京星辰"        hits=32
 所以真正**完全失效**的是"词只在 `keywords` 里、不在 `body` 里"的那部分 ——
 实测这类词就是 **tag label**（`tags` 存 slug，label 只进 `keywords`）：
 
-```
+```text
 带连字符的 tag（只在 keywords 里）: five-star, breakfast-included,
                                     all-suite, all-inclusive, small-ship
 ```
@@ -255,7 +257,7 @@ priceRange: {
 但 compose 里 OpenSearch 属于 `profiles: ["search"]`，默认不启动。实测 9200 不可达。
 于是**每个搜索请求**都会先 fetch 失败、再 catch、再回退 Postgres：
 
-```
+```text
 ! search.opensearch_failed_falling_back {"reason":"fetch failed"}
 ```
 
@@ -285,7 +287,7 @@ priceRange: {
 **（1）FTS 在这个语料上是错的，不是"不够好"。**
 `to_tsvector('simple', '伦敦私享向导一日')` 的结果是：
 
-```
+```text
 '伦敦私享向导一日':1     ← 整串中文是**一个** lexeme，不可再切
 ```
 
@@ -306,7 +308,7 @@ Bitmap Index Scan。**trigram 的正确用法是加速 `LIKE '%...%'` /
 >
 > 装好索引后我做了 `EXPLAIN (ANALYZE)` 对比，结论是反直觉的：
 >
-> ```
+> ```text
 > 表大小: 576 kB | 行数: 230
 >
 > title ILIKE '%guide%'     (建好索引)  ->  Seq Scan   0.43 ms
@@ -360,7 +362,7 @@ create index if not exists search_document_title_unaccent_trgm
 **如果这一步觉得麻烦，可以不建去音调索引** —— 全库实测只有 **1 行**标题含重音
 （`Sagrada Família`）。用 `unaccent()` 做**归一化查询**（不带索引）就够了：
 
-```
+```text
 带重音查询 "Família"  -> 1 行
 无重音查询 "Familia"  -> 0 行   ← 用户实际会这么输
 unaccent(title) 查 "Familia" -> 1 行   ← 修好
@@ -377,9 +379,11 @@ unaccent(title) 查 "Familia" -> 1 行   ← 修好
    同一个检索词走 `body` 是子串匹配、走 `keywords` 是精确匹配，
    于是"能搜到"取决于内容恰好落在哪个字段里 —— 这是个无法向用户解释的行为。
 3. **中文不加任何特殊处理**。实测：
-   ```
+
+   ```text
    body LIKE '%私享向导%'   -> 34 行（Bitmap Index Scan）
    ```
+
    `LIKE` 的定义就是子串匹配，而用户输入的正是子串。**不需要分词。**
 
 > 本节初稿建议改用 `to_tsvector` 做全文检索。实测被推翻：
