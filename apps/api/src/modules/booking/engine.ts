@@ -1,8 +1,8 @@
-import { OrderStatus, PaymentChannel, PaymentStatus, TicketStatus, type PriceRule, type Product, type Prisma, type TicketType } from '@prisma/client';
+import { OrderStatus, PaymentChannel, PaymentStatus, TicketStatus, type PriceRule, type Product, type TicketType } from '@prisma/client';
 import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
-import { differenceInDays, formatServiceDate, hoursBetween, toServiceDate } from '../../utils/date';
+import { differenceInDays, hoursBetween, toServiceDate } from '../../utils/date';
 import { AppError, assertFound } from '../../utils/errors';
 import { generateBarcode, generateOrderNumber, generateTicketNumber } from '../../utils/ids';
 import { allocate, applyBps, sumCents } from '../../utils/money';
@@ -270,8 +270,6 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
     const lineUnits = (p: PricedLine) => p.nights * p.line.quantity;
 
     const subtotal = sumCents(pricedLines.map((p) => p.quote.unitPriceCents * lineUnits(p)));
-    const taxTotal = sumCents(pricedLines.map((p) => p.quote.taxCents * lineUnits(p)));
-    const feeTotal = sumCents(pricedLines.map((p) => p.quote.feeCents * lineUnits(p)));
     const markupTotal = sumCents(pricedLines.map((p) => p.quote.markupCents * lineUnits(p)));
 
     // Coupons discount the pre-tax subtotal.

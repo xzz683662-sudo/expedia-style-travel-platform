@@ -4,6 +4,7 @@ import { prisma } from '../lib/prisma';
 import { resolveLocale } from '../plugins/auth';
 import { getAvailabilityCalendar, releaseExpiredHolds } from '../modules/inventory/engine';
 import { computeQuote } from '../modules/pricing/engine';
+import { liveAirTrafficNear } from '../modules/supply/live-content';
 import { addDays, toServiceDate } from '../utils/date';
 import { AppError, assertFound } from '../utils/errors';
 
@@ -88,6 +89,12 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
 
     // Price every variant for the selected date so the ticket picker and the
     // calendar always agree with what checkout will charge.
+    //
+    // Note what is deliberately absent: no live price lookup here. `basePriceCents`
+    // stays `ticketType.basePriceCents` until a commercial rate source exists to
+    // override it (see `modules/supply/live.ts`). A live *rate* must enter as
+    // this input and nowhere else, so that platform markup, tax and fee are
+    // always computed by `computeQuote` and never by a caller.
     const ticketTypes = product.ticketTypes.map((ticketType) => {
       const quote = computeQuote({
         basePriceCents: ticketType.basePriceCents,
@@ -141,6 +148,15 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       };
     });
 
+    // Real-time content for the detail page. Fire-and-forget on purpose: an
+    // upstream outage must add latency to nothing, and `liveAirTrafficNear`
+    // already swallows its own errors and returns `null`. Awaiting it would make
+    // a 60s-cached external call sit in the critical path of every product view.
+    //
+    // Only flights qualify, and `liveAirTrafficNear` returns `null` for every
+    // other type, so this costs one indexed lookup for a hotel.
+    const liveContentPromise = liveAirTrafficNear(product.slug);
+
     const ratingBreakdown = await prisma.ratingBreakdown.findMany({
       where: { productId: product.id },
       orderBy: { stars: 'desc' },
@@ -159,6 +175,11 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
       take: 8,
       include: { product: { include: { media: { orderBy: { position: 'asc' }, take: 1 }, translations: { take: 1 } } } },
     });
+
+    // The one place this page waits on an external source. Every other field
+    // above is already resolved, so the added latency is bounded by the 8s
+    // upstream timeout and the 60s cache absorbs the repeats.
+    const liveContent = await liveContentPromise;
 
     return {
       id: product.id,
@@ -327,6 +348,13 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
             })),
           }
         : null,
+      /**
+       * Real-time content, when there is any. Advisory only — see
+       * `modules/supply/live-content.ts`. Absent (`undefined`) means "no live
+       * source answered", which is distinct from `null` meaning "no such
+       * product"; the UI renders nothing in either case.
+       */
+      live: liveContent ?? undefined,
       selectedDate: selectedDate.toISOString().slice(0, 10),
       quantity,
       ticketTypes,

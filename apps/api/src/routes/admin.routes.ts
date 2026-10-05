@@ -6,7 +6,7 @@ import { requireRole } from '../plugins/auth';
 import { indexProduct, reindexAll } from '../modules/search/service';
 import { seedInventoryWindow } from '../modules/inventory/engine';
 import { computeQuote } from '../modules/pricing/engine';
-import { AppError, assertFound } from '../utils/errors';
+import { assertFound } from '../utils/errors';
 import { addDays, toServiceDate } from '../utils/date';
 import { hashPassword } from '../utils/crypto';
 

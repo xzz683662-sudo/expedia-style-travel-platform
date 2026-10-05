@@ -98,10 +98,25 @@ async function fetchJson(url: string): Promise<unknown> {
  * adsb.lol — primary source
  * ---------------------------------------------------------------------------
  *
- * Community ADS-B aggregator, no key, no account. Verified live 2026-10-04:
- * `/v2/callsign/DAL112` and `/v2/point/51.47/-0.45/5` both returned fresh
- * traffic around London. `alt_baro` is feet *or* the string `"ground"`, which
- * is why the normaliser branches on the type rather than trusting the number.
+ * Community ADS-B aggregator, no key, no account. Re-verified live 2026-10-04:
+ *
+ *   GET /v2/point/51.47/-0.45/20  -> 200, 9 aircraft, 6 with callsigns
+ *   GET /v2/callsign/DAL112      -> 200, `total: 0` (see below)
+ *   GET /v2/route/LHR/JFK        -> 503, nginx service unavailable
+ *
+ * Only `near()` is load-bearing. The earlier note here claimed
+ * `/v2/callsign/DAL112` "returned fresh traffic"; re-probing showed it returns
+ * an empty `ac` array. The 200 proved the *endpoint* was reachable, not that it
+ * *answered a question* — a distinction worth keeping, because this module's
+ * `byCallsign` is only useful for callsigns that are actually airborne right
+ * now. Anything seeded, historical or synthetic will legitimately return empty,
+ * and empty is not an error.
+ *
+ * `/v2/route` is unusable: 503 as of 2026-10-04. Do not write an adapter for it
+ * hoping route data turns up — `prisma/live-rate-probe.ts` asserts this.
+ *
+ * `alt_baro` is feet *or* the string `"ground"`, which is why the normaliser
+ * branches on the type rather than trusting the number.
  */
 export class AdsbLolSource implements RealtimeFlightSource {
   readonly id = 'adsb-lol';

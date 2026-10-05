@@ -5,21 +5,6 @@ import { prisma } from '../lib/prisma';
 import { requireAuth } from '../plugins/auth';
 import { AppError, assertFound } from '../utils/errors';
 
-const PRODUCT_TYPES_LABEL: Record<string, string> = {
-  ATTRACTION_TICKET: 'Attraction tickets',
-  ACTIVITY: 'Activities',
-  TOUR: 'Tours',
-  DAY_TRIP: 'Day trips',
-  PACKAGE: 'Packages',
-  HOTEL_ROOM: 'Hotels',
-  TRANSFER: 'Transfers',
-  VEHICLE_RENTAL: 'Car rental',
-  GUIDED_TOUR: 'Guided tours',
-  RESTAURANT: 'Restaurants',
-  CRUISE: 'Cruises',
-  RENTAL_CAR: 'Car rental',
-};
-
 export async function socialRoutes(app: FastifyInstance): Promise<void> {
   // -------------------------------------------------------------------------
   // Reviews

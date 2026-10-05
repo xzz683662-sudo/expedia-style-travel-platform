@@ -3,7 +3,6 @@ import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
 import { eachDay, formatServiceDate, toServiceDate } from '../../utils/date';
-import { AppError } from '../../utils/errors';
 
 /**
  * ---------------------------------------------------------------------------
@@ -599,7 +598,7 @@ async function hydrateHits(hits: SearchHit[], locale = 'en'): Promise<SearchHit[
       // Positive, trust-building badge only. A discount percentage is
       // deliberately not used here: the storefront reads as a premium
       // consultancy, not a bargain bin.
-      badge: badgeFor(hit.type, product),
+      badge: badgeFor(product),
       tags: product.tags.map((t) => t.slug),
       category: {
         airlineName: product.airlineName,
@@ -623,7 +622,7 @@ async function hydrateHits(hits: SearchHit[], locale = 'en'): Promise<SearchHit[
  * The small ribbon on a card. Ranked from most to least differentiating so a
  * product always gets the strongest honest signal it has.
  */
-function badgeFor(type: string, product: { skipTheLine: boolean; instantConfirm: boolean; privateDeparture: boolean }): string | null {
+function badgeFor(product: { skipTheLine: boolean; instantConfirm: boolean; privateDeparture: boolean }): string | null {
   if (product.skipTheLine) return 'Priority entry';
   if (product.privateDeparture) return 'Private departure';
   if (product.instantConfirm) return 'Instant confirmation';

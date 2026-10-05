@@ -41,11 +41,6 @@ function int(key: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function num(key: string, fallback: number): number {
-  const parsed = Number.parseFloat(str(key));
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
 export const config = {
   env: str('NODE_ENV', 'development'),
   port: int('PORT', int('API_PORT', 4000)),
@@ -62,6 +57,38 @@ export const config = {
     password: str('OPENSEARCH_PASSWORD'),
     index: str('OPENSEARCH_INDEX', 'easytrip-products'),
     enabled: Boolean(str('OPENSEARCH_NODE')),
+  },
+
+  /**
+   * Real-time supply layer.
+   *
+   * Off by default, and that is a correctness requirement rather than caution:
+   * every consumer of these values falls back to `TicketType.basePriceCents`
+   * when the layer is disabled, so the platform's existing behaviour is
+   * bit-for-bit unchanged until an operator opts in.
+   *
+   * TTLs are deliberately ordered by how much a stale answer costs. Search may
+   * be minutes old (a shopper is still browsing). Availability should not be.
+   * Checkout ignores all of them — see `modules/supply/live.ts`.
+   */
+  supply: {
+    live: {
+      enabled: str('SUPPLY_LIVE_ENABLED', 'false') === 'true',
+      searchTtlSeconds: int('SUPPLY_LIVE_SEARCH_TTL', 300),
+      detailTtlSeconds: int('SUPPLY_LIVE_DETAIL_TTL', 60),
+      availabilityTtlSeconds: int('SUPPLY_LIVE_AVAILABILITY_TTL', 30),
+      /**
+       * Hosts whose images may be written to `ProductMedia.url`.
+       *
+       * An allow-list rather than a proxy: `next.config.ts` needs a matching
+       * `remotePatterns` entry either way, and a generic `?url=` image proxy
+       * would be an SSRF hole for no gain.
+       */
+      allowedImageHosts: str('SUPPLY_LIVE_IMAGE_HOSTS', '')
+        .split(',')
+        .map((host) => host.trim())
+        .filter(Boolean),
+    },
   },
 
   storage: {

@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import websocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { readFile } from 'fs/promises';
-import { basename, join, normalize } from 'path';
+import { join, normalize } from 'path';
 import { config } from './config/env';
 import { logger } from './lib/logger';
 import { checkDatabase, connectDatabase, prisma } from './lib/prisma';

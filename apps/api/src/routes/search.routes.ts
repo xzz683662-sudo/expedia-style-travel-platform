@@ -1,7 +1,6 @@
 import { Prisma, ProductType } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { config } from '../config/env';
 import { prisma } from '../lib/prisma';
 import { resolveLocale } from '../plugins/auth';
 import { TYPE_LABELS, searchProducts, typeLabel } from '../modules/search/service';

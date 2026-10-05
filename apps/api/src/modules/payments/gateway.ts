@@ -178,11 +178,11 @@ class MockPaymentGateway implements PaymentGateway {
     };
   }
 
-  async capture(providerIntentId: string): Promise<CaptureResult> {
+  async capture(_providerIntentId: string): Promise<CaptureResult> {
     return { providerChargeId: `mock_ch_${generateToken(10)}`, status: 'CAPTURED' };
   }
 
-  async refund(providerChargeId: string): Promise<RefundResult> {
+  async refund(_providerChargeId: string): Promise<RefundResult> {
     return { providerRefundId: `mock_re_${generateToken(10)}`, status: 'SUCCEEDED' };
   }
 

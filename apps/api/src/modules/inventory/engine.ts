@@ -179,14 +179,6 @@ type InventoryRow = {
   version: number;
 };
 
-type InventoryWithMode = {
-  capacityTotal: number;
-  capacityHeld: number;
-  capacitySold: number;
-  status: InventoryStatus;
-  inventoryMode: InventoryMode;
-};
-
 /** Atomically places a hold on inventory. Throws when unavailable. */
 export async function placeHold(request: HoldRequest): Promise<HoldResult> {
   const { ticketTypeId, serviceDate, quantity, userId = null, cartId = null } = request;
