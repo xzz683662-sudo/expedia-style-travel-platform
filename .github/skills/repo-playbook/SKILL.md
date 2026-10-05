@@ -26,6 +26,68 @@ pnpm workspace (`pnpm-workspace.yaml`, `pnpm-lock.yaml`). Root `package.json` ho
 2. Never run `run_in_terminal` in parallel with another tool; batch only read-only file tools.
 3. Read `README.md` and the relevant `scripts/*.sh` before assuming a command shape.
 
+## Cold start on a fresh workspace (verified 2026-10-04)
+
+A workspace holding only the **root** `node_modules` (just `typescript`) cannot typecheck, and
+`apps/api/tsconfig.json` reports `找不到"node"的类型定义文件`. That error is a **symptom, not the cause**.
+Fix in this order — nothing compiles until the first three are done:
+
+```bash
+pnpm install --frozen-lockfile
+cp .env.example .env
+(cd apps/api && set -a && . ../../.env && set +a && npx prisma generate)
+docker compose up -d
+(cd apps/api && set -a && . ../../.env && set +a && npx prisma db push --skip-generate --accept-data-loss)
+(cd apps/api && set -a && . ../../.env && set +a && npx tsx prisma/seed.ts)
+```
+
+### An empty Prisma Client still *looks* generated
+`node_modules/.prisma/client/index.d.ts` **exists** even when generation failed, because the
+`@prisma/client` postinstall runs at the repo root where it cannot find `apps/api/prisma/schema.prisma`
+and only warns about it. The stub is ~110 lines. Symptoms:
+- `error TS2305: Module '"@prisma/client"' has no exported member '<AnyEnum>'`
+- a flood of `TS7006: Parameter 'x' implicitly has an 'any' type` in route callbacks — Prisma delegate
+  args lost their types, so every callback parameter degrades. Do **not** annotate them one by one.
+- Check: `grep -c TicketStatus node_modules/.prisma/client/index.d.ts` → `0` means broken. A healthy
+  client runs to tens of thousands of lines.
+
+### `node-linker=hoisted`
+`.npmrc` sets `node-linker=hoisted` + `shamefully-hoist=true`, so per-package `node_modules` stay
+**empty** and everything hoists to the repo root. `apps/api/node_modules/@types/node` not existing is
+correct here — look in the root `node_modules/@types/`.
+
+### mobile-check needs a build and a server at the same time
+`scripts/mobile-check.sh` asserts against the **built CSS** (`.next/static/css/*.css`) *and* **live
+server-rendered HTML** (`WEB_URL`, default :3000). `next dev` deletes `.next` on boot, so dev mode makes
+the script exit 1 with `no built CSS found` right after a successful build. Working sequence:
+
+```bash
+pkill -f 'next dev'; pkill -f next-server          # free :3000
+(cd apps/web && rm -rf .next/types && pnpm --filter @easytrip/web build)
+(cd apps/web && npx next start -p 3000 &)          # next start does NOT wipe .next
+pnpm check:mobile
+```
+`000000` HTTP codes there mean **connection refused** (server not running), not a route regression.
+smoke and realtime need :4000; mobile-check needs :3000 — start all three before `pnpm verify`.
+
+### Long-running servers need `setsid`, not `nohup &`
+`(setsid nohup <cmd> > /tmp/x.log 2>&1 < /dev/null &)` detaches the process from the terminal
+session. Plain `nohup cmd &` does **not** — the child is still a job of the invoking shell and gets
+reaped when that shell / agent turn ends, so the service silently dies and later checks report
+`HTTP 000`. Never claim a server is "still running" without re-probing it in a *later* command;
+assert the port, not the absence of an error.
+
+### The build was never exercised
+Dev runs on `tsx src/index.ts`, which type-checks on the fly and **never touches `outDir`**. So the
+build script, the emitted `dist/` layout, and `pnpm start` can all be broken while every dev-mode
+signal stays green. After changing `tsconfig.json`, `package.json#main`, or anything touching
+module resolution, prove it end to end:
+
+```bash
+(cd apps/api && rm -rf dist && npx tsc -p tsconfig.json)
+ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')")
+```
+
 ## Hard-won pitfalls (verified in this repo)
 
 ### Fastify
@@ -94,10 +156,38 @@ pnpm workspace (`pnpm-workspace.yaml`, `pnpm-lock.yaml`). Root `package.json` ho
 - `Record<string,string|undefined> & {page:number}` is invalid (index signature vs concrete property).
   Use `Record<string, string|number|undefined> & {page:number}`.
 - `ignoreDeprecations: "6.0"` is a TS6 value and errors (TS5103) under TS 5.9.
+- **`rootDir` must match `include`, and the emitted entry must match `package.json#main`.**
+  `apps/api` now uses `rootDir: "src"` with `include: ["src/**/*.ts"]`, so the artifact is
+  `dist/index.js` and `pnpm start` / `render.yaml`'s `startCommand` resolve correctly.
+  When it was `rootDir: "."` with `prisma/**/*.ts` included, tsc emitted `dist/src/index.js`
+  while `main`/`start` pointed at `dist/index.js` — **production start crashed** and nothing in
+  dev ever noticed, because `tsx` runs `src/index.ts` directly. Prisma scripts are fine outside the
+  build: `db:seed` and `supply:import` invoke them via `tsx`, and no `src/` file imports them.
+- **`tsc` emits JS even when type errors exist** (`noEmitOnError` defaults to false). A script with
+  `|| true` can therefore ship incomplete code. `apps/api` sets `noEmitOnError: true`.
+- When enabling `noUnusedLocals` / `noUnusedParameters`, inspect each hit before deleting.
+  An unused **interface parameter that implements a contract** (`capture(_id)` on a gateway) must be
+  renamed with a leading underscore, not removed. Dead *values* are a different matter —
+  `booking/engine.ts` computed `taxTotal`/`feeTotal` that were never read because the persisted
+  `taxCents`/`feeCents` are re-derived per line against the **post-discount** base on purpose
+  (never charge tax on money the customer did not pay). Deleting the two totals was safe; the
+  comments claiming "all four totals must agree" were the misleading part.
+- Prove a deletion is safe by **exhaustively grepping the pre-change file**, not by reading the
+  nearby lines: `git show HEAD:<path> | grep -n '<symbol>'`. A symbol appearing only on its
+  declaration lines across the enclosing function's full range is genuinely unread.
+- `incremental` + `--noEmit` (the `typecheck` script) does **not** speed up typechecking — tsc still
+  re-analyses the program. The cache mainly pays off for emit builds. `tsBuildInfoFile` must live in
+  the `exclude`d `outDir` so it never lands in git. Note `apps/web/tsconfig.tsbuildinfo` is
+  **tracked** by the Next.js template — pre-existing repo noise, not something to "fix" casually.
+- Probe an option's real effect rather than trusting it: append a deliberate
+  `const __probe: number = "x"` to a source file and confirm `noEmitOnError` yields exit 1 **and no
+  emitted JS**, then restore. Remember to `grep -c __probe` afterwards so the probe cannot leak.
 
 ### Terminal
 - The tool simplifies `cd X && cmd` and the real cwd does not change — wrap in `(cd /abs/path && cmd)`.
 - Long inline `node -e` scripts display truncated but execute correctly.
+- Seeding logs `search.index_push_failed {"reason":"fetch failed"}` once per product when the search
+  engine is not running. **Non-fatal** — seeding still finishes with `seed.done`.
 
 ### Date/time helpers (`apps/api/src/utils/date.ts`)
 - `hoursBetween(a, b)` returns `b - a` — always pass `(earlier, later)`. Reversed args make
@@ -113,6 +203,7 @@ pnpm workspace (`pnpm-workspace.yaml`, `pnpm-lock.yaml`). Root `package.json` ho
 - Auth/role gates are added in `apps/api/src/plugins/auth.ts` — check it before adding a new protected route.
 - Prisma client singleton: `apps/api/src/lib/prisma.ts`. Env schema: `apps/api/src/config/env.ts`.
 - Verify changes with `scripts/smoke-test.sh` (and `realtime-test.mjs` for the realtime module).
-  `pnpm verify` runs typecheck → smoke → realtime → mobile in one shot. Baseline as of
-  2026-10-02: smoke **55/55**, realtime **18/18**, mobile **40/40**. `mobile-check.sh` reads the
-  **built** CSS, so run `pnpm --filter @easytrip/web build` first (`next dev` deletes `.next`).
+  `pnpm verify` runs typecheck → audit:schema → smoke → realtime → mobile in one shot and must exit **0**.
+  Baselines re-verified 2026-10-04: typecheck clean on both packages, `audit:schema` reports
+  "No dead columns found" (70 models / 542 scalar columns), smoke **92/92**, realtime **18/18**,
+  mobile **40/40**.

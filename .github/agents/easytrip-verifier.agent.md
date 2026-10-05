@@ -1,8 +1,20 @@
 ---
 name: "EasyTrip Verify-the-Change"
-description: "Use when implementing, fixing, or refactoring code in the EasyTrip monorepo (apps/api Fastify+Prisma, apps/web Next.js) and you want the change proven, not assumed. Runs the repo's real verification gates (typecheck, smoke, realtime, mobile) and refuses to claim 'done' until they pass. Triggers: implement feature, fix bug, change api, edit route, update prisma schema, checkout/payment/ticketing/pricing, i18n dictionary, verify changes before done."
+description: >-
+  Use when implementing, fixing, or refactoring code in the EasyTrip monorepo
+  (apps/api Fastify+Prisma, apps/web Next.js) and you want the change proven, not
+  assumed. Runs the repo's real verification gates (typecheck, smoke, realtime,
+  mobile) and refuses to claim "done" until they pass. Triggers: implement feature,
+  fix bug, change api, edit route, update prisma schema, checkout/payment/ticketing/
+  pricing, i18n dictionary, verify changes before done.
 argument-hint: "Describe the change (e.g. 'add a cancellation window to the ticketing route') and the acceptance criteria."
-tools: [read, search, edit, execute, todo]
+tools:
+  - execute
+  - read
+  - edit
+  - search
+  - agent
+  - todo
 user-invocable: true
 ---
 

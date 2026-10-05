@@ -111,9 +111,9 @@ per the freshness rule above.
 
 | id | data | endpoint | auth | verified |
 | --- | --- | --- | --- | --- |
-| `adsb-lol` | live ADS-B positions, registration, type, squawk | `api.adsb.lol/v2/callsign/{cs}`, `/v2/point/{lat}/{lon}/{radiusNm≤250}` | none | HTTP 200, second-level fresh traffic around London |
+| `adsb-lol` | live ADS-B positions, registration, type, squawk | `api.adsb.lol/v2/callsign/{cs}`, `/v2/point/{lat}/{lon}/{radiusNm≤250}` | none | `/v2/point/51.47/-0.45/20` → 200, 9 aircraft, 6 with callsigns. `/v2/route/…` → **503** |
 | `opensky-network` | live ADS-B state vectors | `opensky-network.org/api/states/all?lamin=…` (bbox) | none (anonymous quota) | HTTP 200, fresh bbox traffic; **fallback only** |
-| `adsbdb` | registration → aircraft type, owner, photo | `api.adsbdb.com/v0/aircraft/{reg}` | none | HTTP 200 (`G-XLEA` → A380-841, British Airways); candidate, not wired |
+| `adsbdb` | registration → aircraft type, owner, photo | `api.adsbdb.com/v0/aircraft/{reg}` | none | HTTP 200 (`G-XLEA` → A380-841, British Airways). **Not usable for catalogue content** — see below |
 
 Evaluated and **not** wired:
 
@@ -121,6 +121,31 @@ Evaluated and **not** wired:
   description first. Revisit if a second radius source is ever needed.
 - `aviationstack` — alive but key-gated; the free tier is too small to be a
   dependable fallback.
+
+### What the content sources cannot answer
+
+Two limits were established by probing, and both constrain what "live content"
+can mean here. Neither is a bug to be fixed later; they are properties of the
+data.
+
+**`/v2/callsign/{cs}` answers only aircraft airborne *right now*.** Re-probed
+2026-10-04: `DAL112` returns `200` with `total: 0`. A 200 proves the endpoint
+is reachable, not that it resolved a flight. Seeded, historical and synthetic
+callsigns legitimately return empty, and empty is a valid answer, not a fault.
+**A live position is therefore an enrichment, never a join key** — the platform
+must not depend on one to render a product.
+
+**`adsbdb` is keyed on registration, which the catalogue does not carry.**
+`FlightSegment` has no `registration` column; it stores `aircraft` as an IATA
+type code (`B77W`) and `flightNumber` on only 12 of 40 rows. `adsbdb` accepts
+neither. It is a useful research tool for enriching a *known* airframe and
+cannot enrich this catalogue.
+
+Where the platform does carry usable keys, the realistic join is geographic:
+`Product.latitude` / `longitude` are populated for all 34 `FLIGHT` products, so
+`near()` is the only content path with a real join. Note that the seeded
+`marketingCarrierCode` and `flightNumber` disagree (e.g. carrier `BA` on flight
+`EK001`), so callsign construction from catalogue columns is not reliable either.
 
 Verified quirks that shape the chain:
 

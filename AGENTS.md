@@ -47,8 +47,8 @@ pnpm audit:schema # flags columns written but never read
 - **Verify before claiming done** — use the
   [`verify-the-change`](./.github/skills/verify-the-change/SKILL.md) skill, or the
   `EasyTrip Verify-the-Change` agent. A change is only complete when a real command
-  passed against the current code. Recorded baseline (2026-10-02): smoke **55/55**,
-  realtime **18/18**, mobile **40/40**.
+  against the current code. Recorded baseline (2026-10-04): smoke **92/92**,
+  realtime **18/18**, mobile **40/40**, `pnpm verify` exits **0**.
 - Onboarding mistakes are documented; repeating them wastes a whole session. Check the
   playbook before running anything unusual.
 - Never run a terminal command in parallel with another terminal tool; batch only
