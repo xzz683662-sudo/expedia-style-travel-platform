@@ -177,16 +177,18 @@ had wrongly concluded nothing usable existed.
 
 Measured on 2026-10-05 against the real binary:
 
-    $ trvl flights JFK LHR 2026-11-15 --format json
-      { "success": true, "count": 125,
-        "flights": [{ "price": 244.64, "currency": "EUR",
-                      "provider": "skiplagged", "legs": [...] }] }
+```text
+$ trvl flights JFK LHR 2026-11-15 --format json
+  { "success": true, "count": 125,
+    "flights": [{ "price": 244.64, "currency": "EUR",
+                  "provider": "skiplagged", "legs": [...] }] }
 
-    $ trvl hotels "Tokyo" --checkin 2026-11-15 --checkout 2026-11-18 --format json
-      { "count": 123, "total_available": 2428,
-        "hotels": [{ "price": 42.37, "nightly_price": 42.37,
-                     "taxes_and_fees": 23.91, "room_types": [...],
-                     "image_url": "https://pix8.agoda.net/..." }] }
+$ trvl hotels "Tokyo" --checkin 2026-11-15 --checkout 2026-11-18 --format json
+  { "count": 123, "total_available": 2428,
+    "hotels": [{ "price": 42.37, "nightly_price": 42.37,
+                 "taxes_and_fees": 23.91, "room_types": [...],
+                 "image_url": "https://pix8.agoda.net/..." }] }
+```
 
 Prices vary by date on the same route (186.60 / 244.64 / 258.92 EUR for Oct /
 Nov / Jan), so this is a real price structure rather than a fixture. Hotels also
@@ -214,9 +216,11 @@ Four limits, all measured:
 
 End-to-end proof (warmer → Redis → resolver), on a real EUR flight:
 
-    ✓ cold read: null (falls back to seeded price)
-    ✓ warm: wrote cache entry
-    ✓ warm read: {"netPriceCents":40089,"currency":"EUR","fromCache":true}
+```text
+✓ cold read: null (falls back to seeded price)
+✓ warm: wrote cache entry
+✓ warm read: {"netPriceCents":40089,"currency":"EUR","fromCache":true}
+```
 
 Reproduce with `prisma/verify-trvl-warm.ts`.
 
