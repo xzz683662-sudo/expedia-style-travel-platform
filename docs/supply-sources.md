@@ -169,23 +169,93 @@ and commercially unclean: it is not an authorised redistribution channel, and
 nothing in this repo's licensing currently permits it. Wiring it is a business
 decision, not a technical one — record the decision here first.
 
+### trvl — zero-key, and the only source measured to return real prices
+
+`MikkoParkkola/trvl` (MIT, `v1.25.0`, cosign-signed single binary). Found via
+`github.com/topics/flight-search`, after an earlier pass over the obvious names
+had wrongly concluded nothing usable existed.
+
+Measured on 2026-10-05 against the real binary:
+
+    $ trvl flights JFK LHR 2026-11-15 --format json
+      { "success": true, "count": 125,
+        "flights": [{ "price": 244.64, "currency": "EUR",
+                      "provider": "skiplagged", "legs": [...] }] }
+
+    $ trvl hotels "Tokyo" --checkin 2026-11-15 --checkout 2026-11-18 --format json
+      { "count": 123, "total_available": 2428,
+        "hotels": [{ "price": 42.37, "nightly_price": 42.37,
+                     "taxes_and_fees": 23.91, "room_types": [...],
+                     "image_url": "https://pix8.agoda.net/..." }] }
+
+Prices vary by date on the same route (186.60 / 244.64 / 258.92 EUR for Oct /
+Nov / Jan), so this is a real price structure rather than a fixture. Hotels also
+carry a usable image URL, which answers the product-media question without
+storing image URLs against products.
+
+Four limits, all measured:
+
+- **24.6 s per invocation.** Fatal inside a request. It is wired as a *pre-warm*
+  source: `trvl-warmer.ts` runs it on a schedule and writes Redis;
+  `trvl-source.ts` only ever reads that cache. A miss returns `[]`, so the
+  shopper sees the seeded price.
+- **`--currency` does not work.** Asked for USD, GBP, AUD or JPY it returned EUR
+  every time at an identical price. The repo has no FX table, and `pickOffer`
+  deliberately refuses to convert, so only EUR-selling routes are warmed —
+  288 of 676 ticket types. Adding conversion here would mean the platform
+  quietly acquiring FX it has never had, in the one place designed to reject it.
+- **Terms.** The README states it is a personal-use tool and that "automated
+  access may violate some providers' Terms of Service — you are responsible for
+  compliance in your jurisdiction." `TRVL_ENABLED` therefore defaults to false.
+  Telemetry is disabled on the child process (`TRVL_NO_TELEMETRY=1`) rather than
+  left to the operator's memory.
+- **No cruise.** There is a `ground` command covering bus, train and ferry, but
+  no cruise search.
+
+End-to-end proof (warmer → Redis → resolver), on a real EUR flight:
+
+    ✓ cold read: null (falls back to seeded price)
+    ✓ warm: wrote cache entry
+    ✓ warm read: {"netPriceCents":40089,"currency":"EUR","fromCache":true}
+
+Reproduce with `prisma/verify-trvl-warm.ts`.
+
+### Rejected after inspection
+
+- **LetsFG** (2110 stars) — the most active project found, and wrong for this
+  platform. It is a consumer affiliate site: onboarding requires connecting a
+  card through a 0.00 Revolut setup, `letsfg.co` is "human-only by default"
+  behind Cloudflare Turnstile, and booking captures a payment from the shopper.
+  That is the affiliate model this project explicitly is not.
+- **flightclaw** — hosted MCP at `mcp.flightclaw.com`. Every path (`/mcp`,
+  `/sse`, `/api`, `/docs`, `/openapi.json`) returns 401. Needs a key, so it is
+  not the zero-key option it is advertised as.
+- **stayingapi/hotel-api** — 3 stars, last pushed 2026-07.
+- **aviasales-mcp** — 13 stars, GPL-3.0. Its upstream was probed directly:
+  `api.travelpayouts.com/v1/prices/cheap` → 401, `/v2/routes/latest` → 404.
+- **OctoTrip/flights** — repository exists; not wired because the flightclaw and
+  LetsFG results showed this niche is dominated by credentialed or affiliate
+  endpoints, and an unverified MCP server is not worth the audit cost.
+
 ### Cruise
 
 **No source is available, and none is stubbed.** Google has no cruise aggregator,
-and each operator (Royal Caribbean, MSC, Carnival…) sells through its own agency
-channel. Until an operator agreement exists, `CRUISE` prices come from
+trvl has no cruise command, and each operator (Royal Caribbean, MSC, Carnival…)
+sells through its own agency channel. `CRUISE` prices come from
 `TicketType.basePriceCents` and search says nothing false about them. This is a
-known gap, not an oversight — building a per-operator scraper to fill it would
-cost far more in maintenance than the category currently earns.
+known gap, not an oversight — a per-operator scraper would cost far more in
+maintenance than the category currently earns.
 
 ### Open endpoints carry no commercial terms
 
 Re-probed alongside the above, all reachable, none usable for rates:
 
-    opensky-network.org/api/states/all  -> 200 (positions)
-    api.adsb.lol/v2/point/...            -> 503 at time of check
-    api.open-meteo.com/v1/forecast      -> 200 (weather; no fare or allotment)
-    en.wikipedia.org/api/rest_v1/...     -> 200 (descriptive content only)
+```text
+opensky-network.org/api/states/all  -> 200 (positions)
+api.adsb.lol/v2/point/...            -> 503 at time of check
+api.open-meteo.com/v1/forecast      -> 200 (weather; no fare or allotment)
+en.wikipedia.org/api/rest_v1/...     -> 200 (descriptive content only)
+```
 
 Content-real-time work uses the last two. They inform what a product page *says*,
 never what it *costs* or whether it can be sold.

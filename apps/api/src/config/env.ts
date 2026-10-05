@@ -112,6 +112,27 @@ export const config = {
       apiKey: str('SERPAPI_API_KEY'),
       baseUrl: str('SERPAPI_BASE_URL', 'https://serpapi.com'),
     },
+    /**
+     * trvl — a zero-key Go binary that returns real flight and hotel prices.
+     *
+     * Off unless explicitly enabled, because trvl is a personal-use tool that
+     * reads Google Flights and Google Hotels, and its own README puts the terms
+     * of service question on the operator. That is a business decision, so it
+     * must be made out loud rather than by default.
+     *
+     * Wired as a *pre-warm* source, never inline: one invocation measured 24.6 s,
+     * which would be fatal inside a request. A background loop calls
+     * `warmTrvlRoute` and {@link TrvlRateSource} reads the result from Redis.
+     */
+    trvl: {
+      enabled: str('TRVL_ENABLED', 'false') === 'true',
+      /** Absolute path to the `trvl` binary. Empty means the source is inert. */
+      binaryPath: str('TRVL_BINARY_PATH'),
+      /** How long a warmed price stays usable. Search freshness is minutes; this matches. */
+      warmTtlSeconds: int('TRVL_WARM_TTL', 900),
+      /** Spawn budget. Generous because a call measured ~25 s. */
+      timeoutMs: int('TRVL_TIMEOUT_MS', 90_000),
+    },
   },
 
   storage: {

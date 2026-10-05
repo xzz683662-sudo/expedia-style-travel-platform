@@ -1,5 +1,6 @@
 import { KiwiRateSource } from './kiwi-source';
 import { LiveRateFinder, type LiveAvailability, type LiveCategory, type LiveOffer, type LiveRateQuery, type LiveRateSource } from './live';
+import { TrvlRateSource } from './trvl-source';
 
 /**
  * ---------------------------------------------------------------------------
@@ -81,6 +82,7 @@ export class NoCommercialRateSource implements LiveRateSource {
  * adapter individually rather than only exercising the composed resolver.
  */
 export const liveRateSources: readonly LiveRateSource[] = [
+  new TrvlRateSource(),
   new KiwiRateSource(),
   new NoCommercialRateSource(),
 ];

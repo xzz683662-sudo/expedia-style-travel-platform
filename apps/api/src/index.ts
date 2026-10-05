@@ -28,6 +28,7 @@ import { socialRoutes } from './routes/social.routes';
 import { supportRoutes } from './routes/support.routes';
 import { ticketingRoutes } from './routes/ticketing.routes';
 import { releaseExpiredHolds } from './modules/inventory/engine';
+import { startTrvlWarmer } from './modules/supply/trvl-warmer';
 import { expireOrder } from './modules/booking/engine';
 import { OrderStatus } from '@prisma/client';
 
@@ -225,10 +226,13 @@ async function main(): Promise<void> {
   });
 
   const sweeper = startBackgroundJobs();
+  // Null when trvl is disabled, in which case there is nothing to clean up.
+  const warmer = startTrvlWarmer();
 
   const shutdown = async (signal: string) => {
     logger.info('server.shutdown_requested', { signal });
     clearInterval(sweeper);
+    if (warmer) clearInterval(warmer);
     await app.close();
     await closeRealtimeBus();
     await prisma.$disconnect();
