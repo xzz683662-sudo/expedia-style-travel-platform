@@ -34,14 +34,19 @@ import { CITIES, type CityDescriptor } from './seed-cities';
 // ---------------------------------------------------------------------------
 
 /**
- * Multipliers from the USD reference price, tuned per currency so a "five-star
- * suite" lands at a believable local figure instead of a converted round number
- * that reads as machine output.
+ * Every price in the catalogue is denominated in USD.
+ *
+ * The platform settled on a single settlement currency, so the previous
+ * per-currency price shaping (a "five-star suite" landing on a round pound or a
+ * round ¥100 so the catalogue would not read as machine output) no longer
+ * applies — there is only one currency to land on.
+ *
+ * Kept as a function rather than inlined so the *reason* a price is the number
+ * it is stays readable: `price(2450, 'USD')` still reads as "2450 USD", and
+ * reintroducing a second currency later means editing one table here rather
+ * than hunting for every `* 100` in the seed.
  */
-const FX: Record<string, number> = {
-  USD: 1, EUR: 0.92, GBP: 0.79, CHF: 0.88, CAD: 1.36,
-  AUD: 1.52, SGD: 1.34, JPY: 157,
-};
+const FX: Record<string, number> = { USD: 1 };
 
 /**
  * JPY and KRW have no minor unit. `formatMoney()` already special-cases

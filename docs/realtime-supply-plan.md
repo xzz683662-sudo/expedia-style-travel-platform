@@ -9,7 +9,7 @@
 
 ### 1.1 交易主链路（已完整，**不需要重写**）
 
-```
+```text
 apps/web/src/app/page.tsx            HomePage          → api.destinations() / api.collection()
 apps/web/src/app/search/page.tsx     SearchPage        → api.search()
 apps/web/src/app/products/[slug]/page.tsx  ProductPage → api.product() + api.availability(90d)
@@ -53,7 +53,7 @@ modules/realtime/notify.ts   emitOrderCreated / emitPaymentEvent / emitOrderEven
 
 ### 1.2 实时数据层（**已存在但是空壳**）
 
-```
+```text
 modules/supply/source.ts        SupplySource        导入型接口：写 Product/Destination，不写钱
 modules/supply/import.ts        importAirportsFrom  OurAirports → Destination(level=AIRPORT)
 modules/supply/ourairports.ts   OurAirportsSource   已 wire，~4,000 机场
@@ -166,7 +166,7 @@ availability/checkout）、TTL 分层、currency 过滤、`sellable===0` 判定�
 
 ### 5.1 Flight
 
-```
+```text
 GET /api/v1/search?types=FLIGHT&date=D
  └─ searchProducts() → Postgres 候选 (SearchDocument)
     └─ resolveAvailabilityAndPrice(ids, [D])                      [M5]
@@ -195,7 +195,7 @@ POST /api/v1/orders                                                 [M10]
 
 ### 5.2 Hotel
 
-```
+```text
 GET /api/v1/search?types=HOTEL_ROOM&date=…&stars=4,5
  └─ resolveAvailabilityAndPrice()                                  [M5]
     ├─ InventoryRecord.dimensionKey = roomType.code，capacityTotal- Held- Sold
@@ -222,7 +222,7 @@ POST /api/v1/cart/checkout  或  POST /api/v1/orders                [M10]
 
 ### 5.3 Cruise
 
-```
+```text
 GET /api/v1/search?types=CRUISE&destinationPort=…
  └─ resolveAvailabilityAndPrice()                                  [M5]
     ├─ InventoryRecord.dimensionKey = ProductSailing.cabinCategories[].code
@@ -295,7 +295,7 @@ interface LiveRateQuery { /* ...现有... */ ticketTypeId?: string }
 | `adsb-lol` | Flight 实时位置 | `api.adsb.lol/v2/point/{lat}/{lon}/{nm}` | **200**，返回 `ac[]` | 需自定义 UA（默认 `node` 被 403）。位置 ≠ 运价/座位 |
 | `opensky-network` | Flight 位置 fallback | `/states/all?lamin=…` | **200**（`states: null` 当夜低空） | 匿名配额稀缺。**不支持 callsign 过滤**（已实测） |
 | `wikidata` | 图片 / 描述 | `wikidata.org/w/api.php?action=wbgetclaims&entity=Q42&property=P18` | **200**，返回 `commonsMedia` 文件名 | CC0。需再查 Commons 取 URL |
-| `commons-imageinfo` | 图片 URL + 缩略图 | `commons.wikimedia.org/w/api.php?action=query&prop=imageinfo&iiprop=url|size&iiurlwidth=1024` | **200**，19KB，含 `thumburl` | CC BY-SA / 公有领域。**share-alike：写进 `ProductMedia.url` 前必须确认归属策略** → 本方案默认只运行时解析，不落库 |
+| `commons-imageinfo` | 图片 URL + 缩略图 | `commons.wikimedia.org/w/api.php?action=query&prop=imageinfo&iiprop=url\|size&iiurlwidth=1024` | **200**，19KB，含 `thumburl` | CC BY-SA / 公有领域。**share-alike：写进 `ProductMedia.url` 前必须确认归属策略** → 本方案默认只运行时解析，不落库 |
 | `nominatim` | 目的地地理 | `nominatim.openstreetmap.org/search?format=json` | **200** | ODbL。**严格 1 req/s 使用政策** → 必须 Redis 缓存 |
 | `overpass-api` | POI 补充 | `overpass-api.de/api/interpreter` | **200**（该 bbox 无 `amenity=hotel` 节点） | ODbL。查询命中率低，仅作可选项 |
 | `airplanes.live` | — | `api.airplanes.live/v2/point/…` | **403** 需邮件申请项目说明 | **禁止接入**（需人工审批，不可自动化） |
@@ -367,38 +367,38 @@ interface LiveRateQuery { /* ...现有... */ ticketTypeId?: string }
 
 ### Phase 2 —— 读路径接入（搜索 / 详情 / 可用性）
 
-7. M5 + M6 `search/service.ts`（内存覆盖，绝不落库）
-8. M7 `products.routes.ts` ticketTypes + `live`/`soldOut`
-9. M8 + M9 availability 两个端点
-10. M13 `/ready` 暴露降级
-11. M15–M18 前端类型、置灰、徽标、i18n
-12. M19 `.env.example`
-13. 验证：`pnpm typecheck && pnpm audit:schema && pnpm smoke && pnpm check:mobile` 全绿
+1. M5 + M6 `search/service.ts`（内存覆盖，绝不落库）
+2. M7 `products.routes.ts` ticketTypes + `live`/`soldOut`
+3. M8 + M9 availability 两个端点
+4. M13 `/ready` 暴露降级
+5. M15–M18 前端类型、置灰、徽标、i18n
+6. M19 `.env.example`
+7. 验证：`pnpm typecheck && pnpm audit:schema && pnpm smoke && pnpm check:mobile` 全绿
 
 **验收**：搜索卡片与详情页显示实时价 + 来源徽标；售罄变体置灰；
 `pnpm audit:schema` 仍为 "No dead columns found"（无新列）。
 
 ### Phase 3 —— Checkout 复验（安全关键）
 
-14. M10 `createPendingOrder` 内 checkout-freshness 复验
+1. M10 `createPendingOrder` 内 checkout-freshness 复验
     - `sellable < quantity` → `INVENTORY_UNAVAILABLE`
     - 价格偏离 > `priceToleranceBps` → `PRICE_CHANGED`（`details` 带前后单价）
-15. M17 `CheckoutFlow` 处理两个错误码
-16. 新增 `scripts/live-supply-check.sh`：断言售罄变体在 checkout 被拒、
+2. M17 `CheckoutFlow` 处理两个错误码
+3. 新增 `scripts/live-supply-check.sh`：断言售罄变体在 checkout 被拒、
     改价后返回 `PRICE_CHANGED`、关闭开关时行为不变
-17. 验证：`pnpm verify` 全绿；**新脚本纳入门禁**
+4. 验证：`pnpm verify` 全绿；**新脚本纳入门禁**
 
 **验收**：篡改 live 源价格/库存后，checkout 明确拒绝且不创建订单；
 `OrderItem` 快照仍为成交价，后续改价不影响历史订单。
 
 ### Phase 4 —— 真实内容源（天气 / 图片）
 
-18. `live-http.ts`
-19. `adapters/open-weather-rate.ts`（先只服务 CRUISE 出发港 + FLIGHT 航线，
+1. `live-http.ts`
+2. `adapters/open-weather-rate.ts`（先只服务 CRUISE 出发港 + FLIGHT 航线，
     Hotel 城市气象等 `open-meteo` 验证后再开）
-20. `live-images.ts`（Wikidata P18 → Commons `thumburl`，24h 缓存，**不落库**）
-21. M20 `docs/supply-sources.md` 补录本轮实测表
-22. 验证：`pnpm supply:probe` 全项；`pnpm verify` 全绿
+3. `live-images.ts`（Wikidata P18 → Commons `thumburl`，24h 缓存，**不落库**）
+4. M20 `docs/supply-sources.md` 补录本轮实测表
+5. 验证：`pnpm supply:probe` 全项；`pnpm verify` 全绿
 
 ### Phase 5 —— 供应商接入位（预留，非本阶段交付）
 

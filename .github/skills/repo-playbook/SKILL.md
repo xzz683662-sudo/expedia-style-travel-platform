@@ -1,7 +1,7 @@
 ---
 name: repo-playbook
 description: 'Workspace facts, verified commands, and hard-won pitfalls for the expedia-style-travel-platform monorepo (pnpm workspace: apps/api Fastify+Prisma, apps/web Next.js). Use when building, running, seeding, debugging, or deploying this project, when touching its Prisma schema, ticketing, payments, or i18n, or before starting any task in this repository.'
-argument-hint: '[area, e.g. "prisma", "i18n", "ticketing"]'
+argument-hint: '(area, e.g. "prisma", "i18n", "ticketing")'
 user-invocable: true
 ---
 
@@ -11,7 +11,7 @@ Project-scoped companion to the global `~/.copilot/copilot-instructions.md`. Loa
 
 ## Layout
 
-```
+```text
 apps/api    Fastify + Prisma + Zod, TypeScript, run via tsx (dev) / node dist (prod)
 apps/web    Next.js App Router, TypeScript, Tailwind
 scripts/    smoke-test.sh, preview.sh, realtime-test.mjs, mobile-check.sh
@@ -42,9 +42,11 @@ docker compose up -d
 ```
 
 ### An empty Prisma Client still *looks* generated
+
 `node_modules/.prisma/client/index.d.ts` **exists** even when generation failed, because the
 `@prisma/client` postinstall runs at the repo root where it cannot find `apps/api/prisma/schema.prisma`
 and only warns about it. The stub is ~110 lines. Symptoms:
+
 - `error TS2305: Module '"@prisma/client"' has no exported member '<AnyEnum>'`
 - a flood of `TS7006: Parameter 'x' implicitly has an 'any' type` in route callbacks — Prisma delegate
   args lost their types, so every callback parameter degrades. Do **not** annotate them one by one.
@@ -52,11 +54,13 @@ and only warns about it. The stub is ~110 lines. Symptoms:
   client runs to tens of thousands of lines.
 
 ### `node-linker=hoisted`
+
 `.npmrc` sets `node-linker=hoisted` + `shamefully-hoist=true`, so per-package `node_modules` stay
 **empty** and everything hoists to the repo root. `apps/api/node_modules/@types/node` not existing is
 correct here — look in the root `node_modules/@types/`.
 
 ### mobile-check needs a build and a server at the same time
+
 `scripts/mobile-check.sh` asserts against the **built CSS** (`.next/static/css/*.css`) *and* **live
 server-rendered HTML** (`WEB_URL`, default :3000). `next dev` deletes `.next` on boot, so dev mode makes
 the script exit 1 with `no built CSS found` right after a successful build. Working sequence:
@@ -67,10 +71,12 @@ pkill -f 'next dev'; pkill -f next-server          # free :3000
 (cd apps/web && npx next start -p 3000 &)          # next start does NOT wipe .next
 pnpm check:mobile
 ```
+
 `000000` HTTP codes there mean **connection refused** (server not running), not a route regression.
 smoke and realtime need :4000; mobile-check needs :3000 — start all three before `pnpm verify`.
 
 ### Long-running servers need `setsid`, not `nohup &`
+
 `(setsid nohup <cmd> > /tmp/x.log 2>&1 < /dev/null &)` detaches the process from the terminal
 session. Plain `nohup cmd &` does **not** — the child is still a job of the invoking shell and gets
 reaped when that shell / agent turn ends, so the service silently dies and later checks report
@@ -78,6 +84,7 @@ reaped when that shell / agent turn ends, so the service silently dies and later
 assert the port, not the absence of an error.
 
 ### The build was never exercised
+
 Dev runs on `tsx src/index.ts`, which type-checks on the fly and **never touches `outDir`**. So the
 build script, the emitted `dist/` layout, and `pnpm start` can all be broken while every dev-mode
 signal stays green. After changing `tsconfig.json`, `package.json#main`, or anything touching
@@ -91,6 +98,7 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
 ## Hard-won pitfalls (verified in this repo)
 
 ### Fastify
+
 - `Fastify({ logger: false })` turns `request.log.error` into a no-op → silent 500s. The error
   handler in `apps/api/src/plugins/error-handler.ts` uses its own logger for this reason.
 - A plugin added via `app.register()` must **not** be placed in `{ preHandler: [plugin] }`.
@@ -101,6 +109,7 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
   `curl -w "%{time_total}"` per endpoint to compare timings.
 
 ### dotenv / env
+
 - Loading a non-existent `.env` fails **silently**; the error surfaces much later as Prisma's
   "Environment variable not found: DATABASE_URL". Resolve `.env` by walking up parent directories rather
   than hardcoding a relative depth — `__dirname` is the process cwd under `tsx` but the source dir under
@@ -117,22 +126,69 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
   smoke tests can pass against stale code. `pkill -f 'tsx watch'` before restarting.
 
 ### Prisma 5
+
 - `@@unique([a,b,c])` **cannot include a nullable field** — `c` is generated as non-null `string`.
   Workaround: `c String @default("")` and use `""` to mean "all day / no time slot"
   (code maps `?? null` → `?? ''`).
 
 ### Money / refunds
+
 - A refund amount of `0` is a **valid** result. Never use `refundBps === 0 ? … : …` as an
   "not computed" sentinel — use a separate flag.
 - The mock payment gateway must return `CAPTURED` (auto-capture model), otherwise `initiatePayment`
   never confirms the order.
 
+### Currency: one settlement currency (USD), FX happens at resolve time
+
+- The whole catalogue is USD. `seed-cities.ts` sets `currency: 'USD'` for all 34 cities and
+  `seed-global.ts`'s `FX` table is `{ USD: 1 }`. Upstreams answer in *their* currency —
+  trvl is EUR-only and ignores `--currency` (measured) — so `utils/fx.ts` converts.
+- **Never rewrite `TicketType.basePriceCents`.** It is the price a *previous* order was
+  priced against. Conversion belongs in `pickOffer` (offer currency → `query.currency`),
+  and settlement stays in `TicketType.currency`.
+- `seed.ts`'s `ticketType.upsert` must list `currency` in **both** `create` and `update`.
+  It only had it in `create`, so changing the currency config and re-seeding left 288 rows
+  in EUR — a seed that cannot re-apply its own config is not idempotent.
+- Verify with `prisma.ticketType.groupBy({ by: ['currency'] })` → expect only `USD`.
+- `cacheSet` writes are best-effort and return `void`; the warmer reads back to confirm.
+
+### Live supply cache
+
+- **A warmed entry must be exactly `LiveOffer[]`.** `LiveRateFinder.resolve()` reads the
+  cache *before* consulting any source, so warmer rows are consumed verbatim. A row missing
+  `sourceId` yields `quote.sourceId === undefined`, which silently reaches
+  `SearchHit.live.sourceId` as null. Use the exported `TRVL_SOURCE_ID` / `TRVL_NATIVE_CURRENCY`.
+- The warmer must key by the **settlement** currency (what the resolver asks with), while the
+  stored row keeps the **upstream** currency (converted on read). Keying on EUR meant a USD
+  request never found a warmed entry — a full cache and zero hits.
+- `trvl dates` is single-origin only: a comma-joined origin returns 0 rows for 11–30 s.
+  A same-airport route (`DXB→DXB`) cost 56 s for nothing. Both are filtered out.
+
+### Search: Postgres is the engine; `pnpm db:indexes` owns the trigram indexes
+
+- OpenSearch is **off by default** and behind `profiles: ["search"]`. If `OPENSEARCH_NODE`
+  is non-empty but unreachable, *every* search request burns a failed round-trip and falls
+  back. `config.search.enabled` is `Boolean(OPENSEARCH_NODE)`.
+- The trigram indexes are **not in `schema.prisma`** (Prisma cannot express `gin_trgm_ops`
+  or a functional index). They live in `apps/api/prisma/indexes.sql`, applied by
+  `pnpm db:indexes`, wired into `pnpm setup`. `db push` will not remove them.
+- `$executeRawUnsafe` rejects multi-statement SQL with
+  `42601 cannot insert multiple commands into a prepared statement` — `apply-indexes.ts`
+  splits on statement boundaries and tracks `$$` regions.
+- `unaccent(text)` is STABLE, not IMMUTABLE, so an expression index needs the
+  `search_unaccent()` wrapper or Postgres refuses to build it.
+- Measured on 230 rows: `to_tsvector` was **54 ms vs 1 ms** for a plain trigram-backed
+  `LIKE`, and `to_tsvector('simple', …)` cannot segment Chinese at all. FTS is a net loss
+  here — see `docs/search-index-design.md`. Do not "upgrade" search to FTS without re-measuring.
+
 ### Ticketing
+
 - Seeding with a raw `prisma.ticket.create()` skips `generateTicketArtifacts`, leaving QR/PDF `null`.
   Seed via the real issuer, plus the `backfillTicketArtifacts()` self-heal for old rows.
 - Tickets are written under `apps/api/storage/tickets/TKT-XXXX-XXXX-XXXX/`.
 
 ### i18n (`apps/web/src/lib/i18n/dictionaries.ts`)
+
 - `as const` on the `en` dictionary freezes literals and produces hundreds of type errors in `zh`.
   Recursive mapped types are worse (TS2536/TS2322/TS2345).
   The only working shape: **no `as const` on `en`**, **no type annotation on `zh`**, validated by
@@ -141,18 +197,21 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
   pluralization and word order.
 
 ### API contract gotchas
+
 - The `PaymentChannel` enum values are **UPPERCASE** (`CARD`). Sending `'card'` fails zod with 422.
 - `api.login(body)` / `api.register(body)` take an object, not positional args.
 - `/auth/me` returns `role` — frontend permission checks depend on it.
 - `api.me()` includes a `transactions` array in the loyalty payload.
 
 ### Next.js App Router
+
 - A nested layout **cannot** render `<html>`.
 - The root layout cannot hide header/footer per route — use `body:has(.marker)` CSS instead, and
   re-add any hidden functionality (e.g. the language switcher) in the new location.
 - Stale route types in `.next/types` cause TS2307 — after changing routes run `rm -rf .next/types`.
 
 ### TypeScript
+
 - `Record<string,string|undefined> & {page:number}` is invalid (index signature vs concrete property).
   Use `Record<string, string|number|undefined> & {page:number}`.
 - `ignoreDeprecations: "6.0"` is a TS6 value and errors (TS5103) under TS 5.9.
@@ -184,12 +243,14 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
   emitted JS**, then restore. Remember to `grep -c __probe` afterwards so the probe cannot leak.
 
 ### Terminal
+
 - The tool simplifies `cd X && cmd` and the real cwd does not change — wrap in `(cd /abs/path && cmd)`.
 - Long inline `node -e` scripts display truncated but execute correctly.
 - Seeding logs `search.index_push_failed {"reason":"fetch failed"}` once per product when the search
   engine is not running. **Non-fatal** — seeding still finishes with `seed.done`.
 
 ### Date/time helpers (`apps/api/src/utils/date.ts`)
+
 - `hoursBetween(a, b)` returns `b - a` — always pass `(earlier, later)`. Reversed args make
   "N hours in advance" logic never match.
 - `new Date(8_000_000_000_000_000)` exceeds the JS Date range (±8.64e15) → `Invalid Date` → `NaN`

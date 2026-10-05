@@ -59,9 +59,23 @@ import type { LiveAvailability, LiveCategory, LiveOffer, LiveRateQuery, LiveRate
 
 /**
  * The currency trvl actually answers in, measured across four requested
- * currencies on 2026-10-05. See `warmTrvlRoute` for why this gates the warm.
+ * currencies on 2026-10-05: EUR every time, at an identical price.
+ *
+ * Exported because the warmer writes rows in this currency and the resolver
+ * converts on read, so both sides have to agree on what "native" means. It is
+ * *not* the settlement currency — `utils/fx` bridges the two.
  */
-const TRVL_NATIVE_CURRENCY = 'EUR';
+export const TRVL_NATIVE_CURRENCY = 'EUR';
+
+/**
+ * The adapter's `id`, exported so the standalone `warmTrvlRoute` below can stamp
+ * rows with the same value the class declares.
+ *
+ * It has to be a shared constant rather than a copied string: the warmer writes
+ * the cache entry and the resolver reads it *without* going through the class, so
+ * a drift between the two would surface as a quote with `sourceId: undefined`.
+ */
+export const TRVL_SOURCE_ID = 'trvl';
 
 interface TrvlFlight {
   price?: number;
@@ -102,7 +116,7 @@ interface TrvlHotelResponse {
 }
 
 export class TrvlRateSource implements LiveRateSource {
-  readonly id = 'trvl';
+  readonly id = TRVL_SOURCE_ID;
   /** MIT for the binary. The *data* it returns is a separate question — see above. */
   readonly license = 'MIT (binary); upstream data terms apply';
   readonly categories: readonly LiveCategory[] = ['FLIGHT', 'HOTEL_ROOM'];
@@ -125,10 +139,6 @@ export class TrvlRateSource implements LiveRateSource {
     const fetchedAt = cached[0]!.fetchedAt;
     const offers: LiveOffer[] = [];
     for (const row of cached) {
-      // Re-checked here rather than trusted from the warmer: the cached entry may
-      // outlive a currency change, and `pickOffer` would silently drop it later.
-      if (row.currency !== query.currency) continue;
-
       offers.push({
         sourceId: this.id,
         externalId: row.externalId,
@@ -151,11 +161,22 @@ export class TrvlRateSource implements LiveRateSource {
   }
 }
 
-/** One warmed row, already normalised to minor units. */
+/**
+ * One warmed row, already normalised to minor units.
+ *
+ * **Shape-identical to `LiveOffer`, deliberately.** `LiveRateFinder.resolve()`
+ * reads the cache *before* consulting any source, so the bytes written by
+ * `warmTrvlRoute` are consumed as `LiveOffer[]` without passing through
+ * `TrvlRateSource` at all. A trimmed row type here would be a lie about what is
+ * actually at that key — and it was: `sourceId`/`sellable` were omitted, so a
+ * cache hit produced a quote with `sourceId: undefined`.
+ */
 export interface CachedRate {
+  sourceId: string;
   externalId: string;
   netPriceCents: number;
   currency: string;
+  sellable: number | null;
   fetchedAt: number;
 }
 
@@ -185,12 +206,14 @@ export async function warmTrvlRoute(query: LiveRateQuery & WarmQuery): Promise<b
 
   const isFlight = query.category === 'FLIGHT';
   // trvl's `--currency` flag was measured and does not work: asked for USD, GBP,
-  // AUD or JPY it returned EUR every time, at an identical price. It has no usable
-  // FX table. Rather than invent a rate — which would mean this repo acquiring FX
-  // conversion it has never had, in the one place where `pickOffer` deliberately
-  // refuses to convert — a route is only warmed when the seller already trades in
-  // the currency trvl answers in. Everything else is skipped rather than guessed.
-  if (query.currency !== TRVL_NATIVE_CURRENCY) return false;
+  // AUD or JPY it returned EUR every time, at an identical price. It publishes no
+  // usable FX table of its own.
+  //
+  // So the binary is always asked the same way, and the EUR it returns is carried
+  // through untouched: `LiveRateFinder` converts it to whatever the seller trades
+  // in, via `utils/fx`. The route therefore no longer depends on the settlement
+  // currency at all, which is what lets one warmed route serve the whole
+  // catalogue now that the platform settles in a single currency.
 
   const args = isFlight
     ? ['flights', query.from ?? '', query.to ?? '', query.serviceDate, '--format', 'json']
@@ -237,9 +260,14 @@ export async function warmTrvlRoute(query: LiveRateQuery & WarmQuery): Promise<b
       rows.push({
         // Provider is kept in the id so two providers for one route stay distinct
         // and a provider outage is visible in the cache rather than silent.
+        sourceId: TRVL_SOURCE_ID,
         externalId: `${query.slug}:${flight.provider ?? 'unknown'}:${rows.length}`,
         netPriceCents: cents,
         currency,
+        // trvl's fare payload carries a `confidence` block, not an allotment.
+        // `null` means "the source did not say" — never `0`, which would assert
+        // the route is sold out.
+        sellable: null,
         fetchedAt: now,
       });
     }
@@ -250,9 +278,11 @@ export async function warmTrvlRoute(query: LiveRateQuery & WarmQuery): Promise<b
       const currency = (hotel.currency ?? '').toUpperCase();
       if (cents === null || currency === '') continue;
       rows.push({
+        sourceId: TRVL_SOURCE_ID,
         externalId: `${query.slug}:${hotel.hotel_id ?? hotel.name ?? rows.length}`,
         netPriceCents: cents,
         currency,
+        sellable: null,
         fetchedAt: now,
       });
     }

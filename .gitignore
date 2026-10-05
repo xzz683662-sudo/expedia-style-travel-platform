@@ -21,3 +21,6 @@ apps/web/tsconfig.tsbuildinfo
 # almost always an accidental `npm install` and must never be committed, or the
 # two lockfiles disagree and installs become non-reproducible.
 /package-lock.json
+
+# Local Python virtualenv (this workspace is TypeScript/pnpm; never commit it).
+/.venv/

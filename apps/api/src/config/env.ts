@@ -135,6 +135,25 @@ export const config = {
     },
   },
 
+  /**
+   * FX — turning an upstream rate into the currency the platform sells in.
+   *
+   * Needed because upstreams choose their own currency (trvl is EUR-only,
+   * measured) while `TicketType.currency` is whatever the seller set — eight
+   * currencies are in the catalogue. Without this, `pickOffer` discards any
+   * offer that does not already match, which removes live pricing from most of
+   * the catalogue.
+   *
+   * Deliberately *not* a rewrite of stored prices: `TicketType.basePriceCents`
+   * is what a previous order was priced against, and settlement still happens in
+   * `TicketType.currency`. See `utils/fx.ts` for the full reasoning.
+   */
+  fx: {
+    /** Free, key-less JSON endpoint. Overridable so it can be swapped or stubbed. */
+    baseUrl: str('FX_BASE_URL', 'https://open.er-api.com/v6/latest'),
+    timeoutMs: int('FX_TIMEOUT_MS', 8_000),
+  },
+
   storage: {
     endpoint: str('S3_ENDPOINT'),
     region: str('S3_REGION', 'us-east-1'),

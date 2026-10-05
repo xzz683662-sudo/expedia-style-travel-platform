@@ -3,7 +3,7 @@ import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
 import { liveRates } from '../supply/live-adapters';
-import type { LiveCategory } from '../supply/live';
+import { LIVE_CATEGORY_BY_PRODUCT_TYPE, type LivePriceInfo } from '../supply/live';
 import { eachDay, formatServiceDate, toServiceDate } from '../../utils/date';
 
 /**
@@ -128,6 +128,12 @@ export type SearchHit = {
   longitude: number | null;
   distanceKm: number | null;
   nextAvailableDate: string | null;
+  /**
+   * Present only when a live source priced this hit, and the price shown is that
+   * source's net cost. Absent means the seeded `TicketType.basePriceCents` stands,
+   * which is the normal case — the storefront renders it either way.
+   */
+  live: LivePriceInfo | null;
   badge: string | null;
   tags: string[];
 
@@ -195,14 +201,21 @@ function emptyFacets(): Facets {
  * Resolves the cheapest sellable price per product for the requested dates.
  * Products with no availability on any requested date are dropped entirely -
  * this is what makes search results bookable rather than merely attractive.
+ *
+ * Returns the live metadata alongside the prices rather than mutating silently:
+ * a shopper whose price moved needs to be able to see that an upstream moved it,
+ * and support needs to know which source to ask.
  */
 async function resolveAvailabilityAndPrice(
   productIds: string[],
   dates: Date[],
   requestedDates?: string[],
-): Promise<Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>> {
+): Promise<{
+  prices: Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>;
+  livePrices: Map<string, LivePriceInfo>;
+}> {
   const result = new Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>();
-  if (productIds.length === 0) return result;
+  if (productIds.length === 0) return { prices: result, livePrices: new Map() };
 
   // Bundles carry no inventory of their own, so they must bypass the
   // availability gate below and be resolved from their components instead.
@@ -254,9 +267,9 @@ async function resolveAvailabilityAndPrice(
 
   await addBundleAvailability(result, bundleProductIds, dates, requestedDates);
 
-  await applyLiveRates(result, ticketTypes);
+  const livePrices = await applyLiveRates(result, ticketTypes);
 
-  return result;
+  return { prices: result, livePrices };
 }
 
 /**
@@ -282,11 +295,36 @@ async function resolveAvailabilityAndPrice(
  * otherwise take the whole search endpoint down, which is a far worse outcome
  * than quoting a slightly stale number.
  */
+/**
+ * Applies live upstream net rates onto the resolved search prices, and returns
+ * what it did per product so `SearchHit.live` can report it.
+ *
+ * Ordering matters and is the whole point of this function:
+ *
+ *   1. **Availability is decided before this runs.** `InventoryRecord` above is
+ *      the only authority on whether anything is sellable. No live source in the
+ *      chain reports a trustworthy allotment, and one that did would be advisory
+ *      anyway — a source can prove "sold out", never "in stock".
+ *   2. **A live price only ever replaces the number a live quote returned.** A
+ *      `null` quote (no source configured, or all sources down) leaves the
+ *      seeded `basePriceCents` untouched, so search behaves exactly as it did
+ *      before this layer existed.
+ *   3. **The value stored is a cost, not a retail price.** `minPriceCents` is
+ *      compared against `TicketType.basePriceCents` upstream, which is itself a
+ *      pre-markup cost, so substituting a net rate here keeps the comparison
+ *      like-for-like. Platform markup, tax and fee are applied later by
+ *      `computeQuote`, exactly as for a seeded price.
+ *
+ * Failure is absorbed rather than propagated: a live layer that throws would
+ * otherwise take the whole search endpoint down, which is a far worse outcome
+ * than quoting a slightly stale number.
+ */
 async function applyLiveRates(
   prices: Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>,
   ticketTypes: { id: string; productId: string }[],
-): Promise<void> {
-  if (!liveRates.enabled || prices.size === 0) return;
+): Promise<Map<string, LivePriceInfo>> {
+  const applied = new Map<string, LivePriceInfo>();
+  if (!liveRates.enabled || prices.size === 0) return applied;
 
   // One live lookup per product, not per ticket type: the upstream answers per
   // product/date, and asking twice for the same row is how rate limits and
@@ -318,7 +356,7 @@ async function applyLiveRates(
       });
       if (!currency) return null;
 
-      const category = LIVE_CATEGORY_BY_PRODUCT_TYPE.get(product.type);
+      const category = LIVE_CATEGORY_BY_PRODUCT_TYPE[product.type];
       if (!category) return null;
 
       const result = await liveRates.resolve(
@@ -335,29 +373,39 @@ async function applyLiveRates(
       // `quote === null` means "no source answered", not "unavailable" — leave
       // the seeded price alone. `degraded` is surfaced on the hit for support.
       return result.quote
-        ? { productId, netPriceCents: result.quote.netPriceCents, degraded: result.degraded }
-        : { productId, netPriceCents: null, degraded: result.degraded };
+        ? {
+            productId,
+            netPriceCents: result.quote.netPriceCents,
+            currency: result.quote.currency,
+            sourceId: result.quote.sourceId,
+            degraded: result.degraded,
+          }
+        : null;
     }),
   );
 
   for (const outcome of settled) {
-    if (!outcome || outcome.netPriceCents === null) continue;
+    if (!outcome) continue;
     const entry = prices.get(outcome.productId);
     if (!entry) continue;
     entry.minPriceCents = outcome.netPriceCents;
+    applied.set(outcome.productId, {
+      netPriceCents: outcome.netPriceCents,
+      currency: outcome.currency,
+      sourceId: outcome.sourceId,
+      degraded: outcome.degraded,
+    });
   }
+  return applied;
 }
 
 /**
  * Only the three categories the live layer carries. Attractions and everything
  * else keep their seeded price, because no source in the chain prices them and
- * guessing would be worse than not answering.
+ * guessing would be worse than not answering. See
+ * `LIVE_CATEGORY_BY_PRODUCT_TYPE` in `modules/supply/live.ts`, which is shared
+ * with the product detail route so both resolve a category the same way.
  */
-const LIVE_CATEGORY_BY_PRODUCT_TYPE = new Map<ProductType, LiveCategory>([
-  [ProductType.FLIGHT, 'FLIGHT'],
-  [ProductType.HOTEL_ROOM, 'HOTEL_ROOM'],
-  [ProductType.CRUISE, 'CRUISE'],
-]);
 
 /**
  * Folds component availability up into each bundle.
@@ -548,7 +596,7 @@ async function searchPostgres(params: SearchParams): Promise<SearchResult> {
     orderBy: candidateOrderBy(params.sort),
   });
 
-  const prices = await resolveAvailabilityAndPrice(
+  const { prices, livePrices } = await resolveAvailabilityAndPrice(
     candidates.map((c) => c.productId),
     dates,
     requestedDates,
@@ -585,6 +633,11 @@ async function searchPostgres(params: SearchParams): Promise<SearchResult> {
         longitude: doc.longitude,
         distanceKm: distance,
         nextAvailableDate: price.nextDate,
+        // Keyed by productId, which is what `resolveAvailabilityAndPrice`
+        // populates. Reading `doc.id` here (the SearchDocument primary key) is
+        // always a miss, so every Postgres-backed hit silently reported
+        // `live: null` even when a source had answered.
+        live: livePrices.get(doc.productId) ?? null,
         badge: null,
         tags: doc.tags,
         starRating: doc.starRating ?? null,
@@ -966,7 +1019,7 @@ async function searchOpenSearch(params: SearchParams): Promise<SearchResult> {
     const dates = requestedDates?.map((d) => toServiceDate(d)) ?? [];
     const rawHits = data.hits.hits.map((h) => h._source as Record<string, unknown>);
 
-    const prices = await resolveAvailabilityAndPrice(
+    const { prices, livePrices } = await resolveAvailabilityAndPrice(
       rawHits.map((h) => h.productId as string),
       dates,
       requestedDates,
@@ -1004,6 +1057,7 @@ async function searchOpenSearch(params: SearchParams): Promise<SearchResult> {
           longitude: (h.longitude as number) ?? null,
           distanceKm: distance,
           nextAvailableDate: price.nextDate,
+          live: livePrices.get(h.productId as string) ?? null,
           badge: null,
           tags: (h.tags as string[]) ?? [],
           starRating: (h.starRating as number) ?? null,
@@ -1078,11 +1132,16 @@ export async function indexProduct(productId: string): Promise<void> {
 
   const defaultTranslation = product.translations.find((t) => t.locale === product.defaultLocale) ?? product.translations[0];
 
-  // Every locale's copy goes into `body` and `keywords`, not just the default.
-  // The Postgres matcher scans `body`/`title`/`keywords`, so a Chinese shopper
-  // searching 「私人向导」 must hit a product whose only English word is
-  // "guide" — that only works if the translated names, summaries and
-  // highlights are indexed alongside the English ones.
+  // Every locale's copy goes into `body` — not just the default.
+  //
+  // The Postgres matcher scans `title`/`body`/`keywords`, so a Chinese shopper
+  // searching 「私享向导」 must hit a product whose only English word is
+  // "guide". That works because `body` is matched as a *substring*
+  // (`contains`), so a contiguous query matches a contiguous field regardless of
+  // language — no tokeniser is involved. FTS cannot do this here: measured on
+  // this catalogue, `to_tsvector('simple', '伦敦私享向导一日')` yields the single
+  // lexeme `'伦敦私享向导一日':1`, i.e. Chinese is not segmentable at all without
+  // zhparser. See docs/search-index-design.md.
   const localizedCopy = product.translations.flatMap((t) => [
     t.name,
     t.summary ?? '',
@@ -1119,7 +1178,22 @@ export async function indexProduct(productId: string): Promise<void> {
     titleAll: product.translations.map((t) => t.name),
     summary: defaultTranslation?.summary ?? null,
     body,
-    keywords: [...product.tags.map((t) => t.label), ...localizedCopy]
+    // `keywords` holds **tokens**, not prose.
+    //
+    // The Postgres matcher tests this field with `has`, which is an exact
+    // array-element comparison. Seeding it with whole sentences (`localizedCopy`
+    // contains full titles, summaries and highlight paragraphs) meant those
+    // entries could only ever be hit by a shopper typing the sentence verbatim —
+    // and the same content was already reachable through `body`, which is
+    // substring-matched. So the array was simultaneously useless and, because
+    // the two fields match differently, a source of "why did *that* not match"
+    // behaviour that cannot be explained to a user.
+    //
+    // Tags stay: a tag label is a genuine token (`five-star`,
+    // `breakfast-included`), lives in no other indexed field, and is exactly
+    // what exact matching is for. The prose is in `body`, unaltered.
+    keywords: product.tags
+      .map((t) => t.label)
       .filter(Boolean)
       .map((k) => String(k).toLowerCase()),
     tags: product.tags.map((t) => t.slug),

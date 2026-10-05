@@ -2,7 +2,17 @@ import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
 import { cacheGet, cacheSet } from '../../utils/redis';
-import { parseTrvlJson, runTrvlBinary, warmKeyFor } from './trvl-source';
+import { parseTrvlJson, runTrvlBinary, warmKeyFor, TRVL_NATIVE_CURRENCY, TRVL_SOURCE_ID } from './trvl-source';
+
+/**
+ * What the platform sells and settles in.
+ *
+ * Kept in lockstep with `utils/fx`'s reporting currency: it is the single
+ * currency the whole catalogue is denominated in. trvl still answers EUR, and
+ * that EUR is converted to this on the way out of `pickOffer` — so the warmed
+ * cache is keyed by this while holding upstream-currency rows.
+ */
+const SETTLEMENT_CURRENCY = config.booking.defaultCurrency;
 
 /**
  * ---------------------------------------------------------------------------
@@ -37,8 +47,35 @@ import { parseTrvlJson, runTrvlBinary, warmKeyFor } from './trvl-source';
  * it gets throttled.
  */
 
-/** How many routes one pass may warm. */
-const ROUTES_PER_PASS = 3;
+/**
+ * Flights inspected per pass.
+ *
+ * Deliberately much larger than {@link ROUTES_PER_PASS}. An earlier version took
+ * the newest nine flights and filtered them afterwards, and on this catalogue that
+ * returned nine non-EUR products every single time — melbourne, sydney, singapore,
+ * kyoto, tokyo, vancouver, toronto, las-vegas, chicago — so the warmer started,
+ * logged, and silently warmed nothing.
+ *
+ * Now that the platform settles in a single currency there is no currency filter
+ * left to satisfy, so this simply has to cover the catalogue: there are 34
+ * flights and a shopper can ask for any of them.
+ */
+const FLIGHTS_SCANNED_PER_PASS = 120;
+
+/**
+ * Routes warmed per pass.
+ *
+ * Sized to the catalogue rather than to taste. An earlier value of 3 warmed nine
+ * routes and search still showed no live price on any of the sixteen EUR flights,
+ * because the odds of a shopper's query landing on one of nine specific routes
+ * are poor. This now covers the whole flight catalogue in one pass.
+ *
+ * The cap is now about wall clock rather than coverage: calls are sequential and
+ * measured between 0.8 s and 7 s for a valid pair, so a pass is bounded to tens
+ * of seconds. Sequential because the providers behind this rate-limit on request
+ * cadence, and a warmer that fans out is the reason it gets throttled.
+ */
+const ROUTES_PER_PASS = 40;
 
 /**
  * Days one `dates` call covers.
@@ -48,25 +85,21 @@ const ROUTES_PER_PASS = 3;
  */
 const DAYS_PER_CALL = 30;
 
-/**
- * Origins packed into one trvl invocation.
- *
- * trvl accepts comma-separated IATA codes, and a batch was measured at 25.5 s
- * for three origins returning 415 results, against 24.6 s and 125 results for a
- * single route. The latency is per *call*, not per route, so batching is the only
- * lever that actually moves throughput — three routes cost the same wall clock as
- * one. Kept small because a very wide fan-out risks the provider rate limits that
- * make a call fail outright.
- */
-const ORIGINS_PER_CALL = 3;
-
 /** Plausible future dates, so a warmed price is not stale on arrival. */
-function upcomingDates(): string[] {
-  const today = new Date();
-  return [7, 14, 21].map((days) => {
-    const date = new Date(today.getTime() + days * 86_400_000);
-    return date.toISOString().slice(0, 10);
-  });
+/**
+ * Start of the warmed window.
+ *
+ * Today, not "a week out". The detail page prices `selectedDate`, which defaults
+ * to today when the shopper did not pass one, and `LiveRateQuery.serviceDate` is
+ * an exact-date lookup rather than a range. Starting the window seven days ahead
+ * meant the single most common request — open a product page with no date — never
+ * hit a warm entry, which is how an entire cache can be full and still be useless.
+ *
+ * The window is `[today, today + DAYS_PER_CALL)`, so a product page asked for any
+ * date in the next month finds one.
+ */
+function windowStart(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 /**
@@ -94,9 +127,12 @@ interface Route {
  */
 async function candidateRoutes(): Promise<Route[]> {
   const flights = await prisma.productFlight.findMany({
-    take: ROUTES_PER_PASS * ORIGINS_PER_CALL,
+    take: FLIGHTS_SCANNED_PER_PASS,
     orderBy: { updatedAt: 'desc' },
-    select: { productId: true, product: { select: { slug: true } } },
+    select: {
+      productId: true,
+      product: { select: { slug: true } },
+    },
   });
 
   const routes: Route[] = [];
@@ -113,35 +149,16 @@ async function candidateRoutes(): Promise<Route[]> {
 
     const from = segments[0]!.departureAirport.trim().toUpperCase();
     const to = segments[segments.length - 1]!.arrivalAirport.trim().toUpperCase();
-    // Both ends must be real IATA codes. Half a route is not a cheaper query, it
-    // is a rejected one that costs a process spawn to discover.
-    if (from.length !== 3 || to.length !== 3) continue;
+    // Both ends must be real IATA codes, and they must differ. A same-airport
+    // "route" is not a cheaper query, it is a slower one: measured at 34 s versus
+    // 0.6 s for a valid pair, because trvl retries providers looking for a fare
+    // that cannot exist. One such route in a batch costs thirty times the budget.
+    if (from.length !== 3 || to.length !== 3 || from === to) continue;
 
-    const slug = flight.product.slug;
-    const currency = await firstCurrency(slug);
-    // trvl answers in EUR whatever `--currency` says, and the repo has no FX
-    // table, so a non-EUR product can never accept its answer. Skipping here
-    // saves a ~25 s spawn per skipped route instead of discovering it afterwards.
-    if (currency !== 'EUR') continue;
-
-    routes.push({ slug, from, to, currency });
+    routes.push({ slug: flight.product.slug, from, to, currency: TRVL_NATIVE_CURRENCY });
+    if (routes.length >= ROUTES_PER_PASS) break;
   }
   return routes;
-}
-
-/**
- * The currency this product sells in.
- *
- * Read rather than assumed because `computeQuote` performs no FX conversion: a
- * quote warmed in the wrong currency is discarded by `pickOffer`, so warming it
- * would burn ~25 s of upstream for nothing.
- */
-async function firstCurrency(slug: string): Promise<string | null> {
-  const ticketType = await prisma.ticketType.findFirst({
-    where: { product: { slug }, active: true },
-    select: { currency: true },
-  });
-  return ticketType?.currency ?? null;
 }
 
 /**
@@ -164,27 +181,27 @@ export function startTrvlWarmer(): NodeJS.Timeout | null {
     }
     if (routes.length === 0) return;
 
-    // Group by destination, because trvl's batching axis is the origin list:
-    // `flights "LHR,CDG,AMS" JFK` prices three routes in one ~25 s call. Grouping
-    // by origin instead would price the same route repeatedly, once per batch.
-    const byDestination = new Map<string, Route[]>();
+    // One `dates` call per route. Measured, not assumed:
+    //
+    //   HKG -> DXB              6689 ms, 21 dates
+    //   JFK -> DXB               831 ms, 21 dates
+    //   DXB -> DXB             56116 ms, 0 dates
+    //   "HKG,DXB,JFK" -> DXB   11560 ms, 0 dates
+    //
+    // So `dates` takes a single origin — the comma-separated form that `flights`
+    // accepts silently returns nothing — and the origin must differ from the
+    // destination. An earlier version grouped routes by destination and passed
+    // several origins at once, on the assumption that batching worked the way it
+    // does for `flights`. It does not: every such call returned zero and still
+    // cost 11–30 s. Grouping was removed rather than patched, because a batch that
+    // prices nothing is worse than no batch — it looks like coverage.
     for (const route of routes) {
-      const group = byDestination.get(route.to);
-      if (group) group.push(route);
-      else byDestination.set(route.to, [route]);
-    }
-
-    for (const [destination, group] of byDestination) {
-      const origins = group.slice(0, ORIGINS_PER_CALL).map((route) => route.from);
-      const warmed = await warmTrvlBatch(group, origins, destination).catch((error: unknown) => {
-        logger.warn('supply.trvl_warm_failed', {
-          destination,
-          reason: (error as Error).message,
-        });
+      const warmed = await warmTrvlRoute(route).catch((error: unknown) => {
+        logger.warn('supply.trvl_warm_failed', { slug: route.slug, reason: (error as Error).message });
         return 0;
       });
       if (warmed > 0) {
-        logger.info('supply.trvl_warmed', { destination, routes: warmed, origins: origins.length });
+        logger.info('supply.trvl_warmed', { slug: route.slug, from: route.from, to: route.to, days: warmed });
       }
     }
   };
@@ -195,34 +212,29 @@ export function startTrvlWarmer(): NodeJS.Timeout | null {
   const timer = setInterval(() => void run(), config.supply.trvl.warmTtlSeconds * 1_000);
   logger.info('supply.trvl_warmer_started', {
     intervalSeconds: config.supply.trvl.warmTtlSeconds,
-    originsPerCall: ORIGINS_PER_CALL,
+    routesPerPass: ROUTES_PER_PASS,
+    daysPerCall: DAYS_PER_CALL,
   });
   return timer;
 }
 
 /**
- * Prices every date in the window for a batch of routes sharing a destination,
- * and writes one cache entry per (route, date). Returns how many entries landed.
- *
- * The batch response is not attributable per origin, so every slug in the group
- * receives the same per-date price. That is deliberate and errs in the safe
- * direction: the batch is queried for exactly these routes, and quoting a sibling
- * route's fare low under-promises rather than over-charges. `computeQuote` still
- * applies full markup on top.
+ * Prices every date in the window for one route and writes one cache entry per
+ * date. Returns how many entries landed.
  *
  * Writing the whole window, not just today, is the point of using `dates`: one
- * 0.6 s call fills thirty days, so a shopper searching any date in the next month
- * hits a warm cache instead of paying for a cold one.
+ * call fills thirty days, so a shopper searching any date in the next month hits
+ * a warm cache instead of paying for a cold one.
  */
-async function warmTrvlBatch(group: Route[], origins: string[], destination: string): Promise<number> {
+async function warmTrvlRoute(route: Route): Promise<number> {
   const binary = config.supply.trvl.binaryPath;
-  const from = upcomingDates()[0]!;
+  const from = windowStart();
   const to = addDays(from, DAYS_PER_CALL - 1);
 
   const raw = await runTrvlBinary(binary, [
     'dates',
-    origins.join(','),
-    destination,
+    route.from,
+    route.to,
     '--from',
     from,
     '--to',
@@ -237,28 +249,46 @@ async function warmTrvlBatch(group: Route[], origins: string[], destination: str
 
   const now = Date.now();
   let written = 0;
-  for (const route of group) {
-    for (const [serviceDate, netPriceCents] of byDate) {
-      const key = warmKeyFor(route.slug, serviceDate, route.currency);
-      await cacheSet(
-        key,
-        [
-          {
-            externalId: `${route.slug}:${origins.join('+')}:${serviceDate}`,
-            netPriceCents,
-            currency: route.currency,
-            fetchedAt: now,
-          },
-        ],
-        config.supply.trvl.warmTtlSeconds,
-      );
-      // `cacheSet` is best-effort and returns void, so trusting the call would make
-      // this counter a fiction — a Redis outage would still report every entry
-      // written. Read back instead: that is the same lookup `TrvlRateSource` does,
-      // so a count of 1 means the adapter will really find it.
-      const readBack = await cacheGet<unknown[]>(key);
-      if (readBack && readBack.length > 0) written += 1;
-    }
+  for (const [serviceDate, netPriceCents] of byDate) {
+    // Keyed by the *settlement* currency, because that is what the resolver
+    // asks with: `warmKeyFor` mirrors the resolver's cache identity. The stored
+    // row keeps the upstream currency, because `pickOffer` converts on read.
+    // Keying on EUR here instead would mean a USD request never finds a warmed
+    // entry — a full cache and zero hits, which is the failure this module has
+    // already produced once.
+    const key = warmKeyFor(route.slug, serviceDate, SETTLEMENT_CURRENCY);
+    await cacheSet(
+      key,
+      [
+        {
+          // The full `LiveOffer` shape, not a trimmed one.
+          //
+          // `LiveRateFinder.resolve()` reads this exact key itself, before it
+          // ever reaches `TrvlRateSource.getRates` — so whatever is written here
+          // is consumed as `LiveOffer[]` verbatim. A warmer row missing
+          // `sourceId` therefore produced a quote whose `sourceId` was
+          // `undefined`, silently, and `LivePriceInfo.sourceId` reached the
+          // search response as null. One key, one shape.
+          sourceId: TRVL_SOURCE_ID,
+          externalId: `${route.slug}:${route.from}${route.to}:${serviceDate}`,
+          netPriceCents,
+          // The upstream's currency. `pickOffer` converts to the settlement
+          // currency on the way out via `utils/fx`.
+          currency: TRVL_NATIVE_CURRENCY,
+          // The warmer records no allotment. `null` is "the source did not say",
+          // which is a different claim from `0` ("confirmed sold out").
+          sellable: null,
+          fetchedAt: now,
+        },
+      ],
+      config.supply.trvl.warmTtlSeconds,
+    );
+    // `cacheSet` is best-effort and returns void, so trusting the call would make
+    // this counter a fiction — a Redis outage would still report every entry
+    // written. Read back instead: that is the same lookup `TrvlRateSource` does,
+    // so a count of 1 means the adapter will really find it.
+    const readBack = await cacheGet<unknown[]>(key);
+    if (readBack && readBack.length > 0) written += 1;
   }
   return written;
 }
@@ -285,10 +315,11 @@ function parseDatePrices(raw: string): Map<string, number> {
   for (const row of parsed?.dates ?? []) {
     if (!row.date) continue;
     if (typeof row.price !== 'number' || !Number.isFinite(row.price) || row.price < 0) continue;
-    // Only EUR is accepted, for the same reason the rest of this module does it:
-    // trvl ignores `--currency`, `pickOffer` refuses to convert, and inventing a
-    // rate here would mean the platform acquiring FX it has never had.
-    if ((row.currency ?? '').toUpperCase() !== 'EUR') continue;
+    // trvl ignores `--currency` and answers EUR, measured across four requested
+    // currencies. Anything else is skipped rather than guessed at: the row has
+    // no rate of its own, and inventing one is exactly what `utils/fx` exists
+    // to prevent. `pickOffer` converts this EUR to the settlement currency.
+    if ((row.currency ?? '').toUpperCase() !== TRVL_NATIVE_CURRENCY) continue;
     out.set(row.date, Math.round(row.price * 100));
   }
   return out;

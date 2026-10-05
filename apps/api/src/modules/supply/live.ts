@@ -1,6 +1,7 @@
 import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { cacheGet, cacheSet } from '../../utils/redis';
+import { convertMinorUnits } from '../../utils/fx';
 
 /**
  * ---------------------------------------------------------------------------
@@ -40,6 +41,24 @@ import { cacheGet, cacheSet } from '../../utils/redis';
 
 /** The categories that carry commercial terms. Attractions are not live-sourced. */
 export type LiveCategory = 'FLIGHT' | 'HOTEL_ROOM' | 'CRUISE';
+
+/**
+ * What the live layer did to one product's price, for display and support.
+ *
+ * Lives here rather than in `modules/search` because two very different callers
+ * need it: search, which prices many products at once, and the product detail
+ * route, which prices one. Both must report the same shape, or a shopper who
+ * searches then opens a product sees two different explanations of the same
+ * number.
+ */
+export interface LivePriceInfo {
+  /** Upstream net cost in minor units, before platform markup. */
+  netPriceCents: number;
+  currency: string;
+  sourceId: string;
+  /** True when every source failed — surfaced for support, not for shoppers. */
+  degraded: boolean;
+}
 
 /** One upstream price for one sellable variant on one date. */
 export interface LiveOffer {
@@ -182,7 +201,7 @@ export class LiveRateFinder implements LiveRateResolver {
       // An empty array is a real cached answer ("verified unsold"), and it is
       // truthy, so the hit check returns it rather than re-walking the chain.
       if (cached) {
-        return { quote: pickOffer(cached, query, true), degraded: this.lastDegraded };
+        return { quote: await pickOffer(cached, query, true), degraded: this.lastDegraded };
       }
     }
 
@@ -211,7 +230,7 @@ export class LiveRateFinder implements LiveRateResolver {
       // for a different quantity without another upstream call.
       await cacheSet(key, offers, TTL_BY_FRESHNESS[freshness]);
     }
-    return { quote: pickOffer(offers, query, false), degraded: this.lastDegraded };
+    return { quote: await pickOffer(offers, query, false), degraded: this.lastDegraded };
   }
 
   async resolveAvailability(
@@ -245,27 +264,31 @@ export class LiveRateFinder implements LiveRateResolver {
 }
 
 /**
- * Cheapest usable offer, or `null`.
+ * Cheapest usable offer, converted into the seller's currency, or `null`.
  *
  * Three rejections happen here, and each one is a bug this repo has already
  * paid for in a different shape:
  *
- *   - **Currency mismatch.** `computeQuote` does no FX conversion — handing it
- *     100 EUR against a `TicketType.currency` of USD would silently charge 100
- *     dollars. A mismatched offer is discarded, never converted.
- *   - **Non-finite price.** `Number('')` is `0` and `Number('1,20')` is `NaN`,
- *     both of which are plausible results of parsing an upstream string. Only a
- *     genuine non-negative integer passes.
+ *   - **Unconvertible price.** `Number('')` is `0` and `Number('1,20')` is
+ *     `NaN`, both of which are plausible results of parsing an upstream string.
+ *     Only a genuine non-negative integer passes.
+ *   - **No rate available.** Conversion failing is *not* a silent pass-through.
+ *     A missing rate table has to leave the seeded price alone rather than let
+ *     "100 EUR" be read as "100 USD" — the exact bug this function existed to
+ *     prevent before `utils/fx` existed.
  *   - **Confirmed sold out.** `sellable === 0` is a real answer and must win
  *     over a cheaper offer that merely happens to be listed first.
+ *
+ * The returned quote is always in `query.currency`, which is what makes it
+ * safe to hand to `computeQuote`: that function still performs no conversion of
+ * its own, and this is now what guarantees it never has to.
  */
-function pickOffer(offers: LiveOffer[], query: LiveRateQuery, fromCache: boolean): LiveQuote | null {
+async function pickOffer(offers: LiveOffer[], query: LiveRateQuery, fromCache: boolean): Promise<LiveQuote | null> {
   const usable = offers.filter(
     (offer) =>
       typeof offer.netPriceCents === 'number' &&
       Number.isInteger(offer.netPriceCents) &&
-      offer.netPriceCents >= 0 &&
-      offer.currency === query.currency,
+      offer.netPriceCents >= 0,
   );
   if (usable.length === 0) return null;
 
@@ -274,25 +297,37 @@ function pickOffer(offers: LiveOffer[], query: LiveRateQuery, fromCache: boolean
   // wins over a stale one at the same price.
   const soldOut = usable.filter((offer) => offer.sellable === 0);
   const pool = soldOut.length > 0 ? soldOut : usable;
-  const best = pool.reduce((a, b) =>
-    b.netPriceCents < a.netPriceCents || (b.netPriceCents === a.netPriceCents && b.fetchedAt > a.fetchedAt)
+
+  const priced = await Promise.all(
+    pool.map(async (offer) => {
+      const netPriceCents =
+        offer.currency === query.currency
+          ? offer.netPriceCents
+          : await convertMinorUnits(offer.netPriceCents, offer.currency, query.currency);
+      return netPriceCents === null ? null : { offer, netPriceCents };
+    }),
+  );
+  const converted = priced.filter((row): row is { offer: LiveOffer; netPriceCents: number } => row !== null);
+  if (converted.length === 0) return null;
+
+  const best = converted.reduce((a, b) =>
+    b.netPriceCents < a.netPriceCents || (b.netPriceCents === a.netPriceCents && b.offer.fetchedAt > a.offer.fetchedAt)
       ? b
       : a,
   );
 
   return {
     netPriceCents: best.netPriceCents,
-    currency: best.currency,
-    sellable: best.sellable,
-    sourceId: best.sourceId,
-    fetchedAt: best.fetchedAt,
+    currency: query.currency,
+    sellable: best.offer.sellable,
+    sourceId: best.offer.sourceId,
+    fetchedAt: best.offer.fetchedAt,
     fromCache,
   };
 }
 
 /** `null` when caching is off for this freshness, so nothing is read or written. */
-function cacheKey(query: LiveRateQuery, freshness: LiveFreshness): string | null {
-  const ttl = TTL_BY_FRESHNESS[freshness];
+function cacheKey(query: LiveRateQuery, freshness: LiveFreshness): string | null {  const ttl = TTL_BY_FRESHNESS[freshness];
   if (ttl <= 0) return null;
   return [
     'live:rate',
@@ -301,10 +336,27 @@ function cacheKey(query: LiveRateQuery, freshness: LiveFreshness): string | null
     query.serviceDate,
     query.checkOutDate ?? '',
     String(query.quantity),
-    // Currency is part of the cache identity because `pickOffer` filters on
-    // it: sharing an entry across currencies would let a EUR answer serve a USD
-    // request whenever the filter happened to find nothing else.
+    // The cached payload is the *upstream's* currency, unconverted, so the raw
+    // rows are in fact currency-independent. The key still names the currency
+    // because it names the request: `pickOffer` converts on the way out, and two
+    // callers asking for different currencies must not race on one entry and
+    // overwrite each other's answer with whichever conversion landed last.
     query.currency,
     freshness,
   ].join(':');
 }
+
+/**
+ * Which live category a product type maps to, if any.
+ *
+ * Deliberately keyed by the Prisma enum's *string* values rather than by
+ * `ProductType`, so this module stays a pure contract with no Prisma import —
+ * `live.ts` is imported by adapters and by the probe, and pulling the generated
+ * client in would make the seam heavier than the thing it seams. A rename of the
+ * enum fails the type check here rather than silently returning `undefined`.
+ */
+export const LIVE_CATEGORY_BY_PRODUCT_TYPE: Readonly<Record<string, LiveCategory>> = {
+  FLIGHT: 'FLIGHT',
+  HOTEL_ROOM: 'HOTEL_ROOM',
+  CRUISE: 'CRUISE',
+};

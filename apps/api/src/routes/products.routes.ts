@@ -1,14 +1,70 @@
+import { ProductType } from '@prisma/client';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { logger } from '../lib/logger';
 import { prisma } from '../lib/prisma';
 import { resolveLocale } from '../plugins/auth';
 import { getAvailabilityCalendar, releaseExpiredHolds } from '../modules/inventory/engine';
 import { computeQuote } from '../modules/pricing/engine';
 import { liveAirTrafficNear } from '../modules/supply/live-content';
-import { addDays, toServiceDate } from '../utils/date';
+import { liveRates } from '../modules/supply/live-adapters';
+import { LIVE_CATEGORY_BY_PRODUCT_TYPE, type LivePriceInfo } from '../modules/supply/live';
+import { addDays, formatServiceDate, toServiceDate } from '../utils/date';
 import { AppError, assertFound } from '../utils/errors';
 
 /** Full product detail page payload - the workhorse of the whole frontend. */
+/**
+ * Live net rate per ticket type for the detail page.
+ *
+ * Keyed by `ticketType.id` because every variant of one product quotes the same
+ * upstream net cost: the source prices a route or a room, not a fare bucket. The
+ * variants still differ afterwards, because `computeQuote` applies each one's own
+ * tax and fee. Spreading one upstream price across buckets without letting those
+ * diverge would quietly erase the differences between economy and business.
+ *
+ * Failure is absorbed. A live layer that throws must not take down the detail
+ * page — the shopper gets seeded prices, which is a lesser outcome than an error.
+ */
+async function resolveLiveRatesForDetail(
+  product: { slug: string; type: ProductType; ticketTypes: { id: string; currency: string }[] },
+  selectedDate: string,
+  quantity: number,
+): Promise<Map<string, LivePriceInfo>> {
+  const out = new Map<string, LivePriceInfo>();
+  if (!liveRates.enabled || product.ticketTypes.length === 0) return out;
+
+  const category = LIVE_CATEGORY_BY_PRODUCT_TYPE[product.type];
+  if (!category) return out;
+
+  // Variants can disagree on currency, so the first one is not representative.
+  // A product whose variants straddle currencies is priced inconsistently by the
+  // platform anyway, and silently picking one would compound that.
+  const currency = product.ticketTypes[0]!.currency;
+
+  const result = await liveRates
+    .resolve({ slug: product.slug, category, serviceDate: selectedDate, quantity, currency }, 'detail')
+    .catch((error: unknown) => {
+      logger.warn('live.detail_resolve_failed', {
+        slug: product.slug,
+        reason: (error as Error).message,
+      });
+      return null;
+    });
+
+  if (!result?.quote) return out;
+
+  const info: LivePriceInfo = {
+    netPriceCents: result.quote.netPriceCents,
+    currency: result.quote.currency,
+    sourceId: result.quote.sourceId,
+    degraded: result.degraded,
+  };
+  for (const ticketType of product.ticketTypes) {
+    if (ticketType.currency === currency) out.set(ticketType.id, info);
+  }
+  return out;
+}
+
 export async function productRoutes(app: FastifyInstance): Promise<void> {
   app.get('/products/:slug', async (request) => {
     const { slug } = z.object({ slug: z.string().min(1) }).parse(request.params);
@@ -87,17 +143,25 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
     const today = toServiceDate(new Date());
     const selectedDate = query.date ? toServiceDate(query.date) : today;
 
+    // The detail page prices at `detail` freshness: one refresh per page view,
+    // cached briefly, because a shopper comparing products should not pay for a
+    // fresh upstream call per tab. A miss leaves `basePriceCents` alone.
+    //
+    // The live *net* rate replaces only the `basePriceCents` input. Markup, tax
+    // and fee stay inside `computeQuote` exactly as for a seeded price, so the
+    // platform never hands out an upstream number as a retail one.
+    const liveByTicketType = await resolveLiveRatesForDetail(
+      product,
+      formatServiceDate(selectedDate),
+      quantity,
+    );
+
     // Price every variant for the selected date so the ticket picker and the
     // calendar always agree with what checkout will charge.
-    //
-    // Note what is deliberately absent: no live price lookup here. `basePriceCents`
-    // stays `ticketType.basePriceCents` until a commercial rate source exists to
-    // override it (see `modules/supply/live.ts`). A live *rate* must enter as
-    // this input and nowhere else, so that platform markup, tax and fee are
-    // always computed by `computeQuote` and never by a caller.
     const ticketTypes = product.ticketTypes.map((ticketType) => {
+      const live = liveByTicketType.get(ticketType.id);
       const quote = computeQuote({
-        basePriceCents: ticketType.basePriceCents,
+        basePriceCents: live?.netPriceCents ?? ticketType.basePriceCents,
         compareAtPriceCents: ticketType.compareAtCents,
         taxBps: ticketType.taxBps,
         feeBps: ticketType.feeBps,
@@ -355,6 +419,12 @@ export async function productRoutes(app: FastifyInstance): Promise<void> {
        * product"; the UI renders nothing in either case.
        */
       live: liveContent ?? undefined,
+      /**
+       * Live rate provenance, present only when an upstream priced this product.
+       * The displayed price already includes platform markup; `netPriceCents` is
+       * the cost that went into it, kept so support can explain the difference.
+       */
+      liveRate: liveByTicketType.size > 0 ? [...liveByTicketType.values()][0]! : undefined,
       selectedDate: selectedDate.toISOString().slice(0, 10),
       quantity,
       ticketTypes,

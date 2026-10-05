@@ -1,7 +1,7 @@
 ---
 name: verify-the-change
 description: 'Use when implementing, fixing, refactoring, or verifying any change in the expedia-style-travel-platform monorepo. This workflow forces a root-cause diagnosis, repo-specific guardrails, and fresh evidence from the real verification gates before claiming a fix is complete.'
-argument-hint: '[change, e.g. "fix ticketing refund calculation" or "add Prisma column and seed"]'
+argument-hint: 'change, e.g. "fix ticketing refund calculation" or "add Prisma column and seed"'
 user-invocable: true
 ---
 
@@ -12,6 +12,7 @@ Project-scoped workflow for the Expedia-style travel platform. Load this skill b
 ## When to use
 
 Use this skill for:
+
 - debugging an existing bug or flaky behavior
 - implementing a feature or route change
 - updating Prisma schema, seed scripts, or data contracts
@@ -31,6 +32,7 @@ Never claim a fix is complete without fresh evidence from the repo's actual veri
 - If the change is not yet reproducible, create a focused failing check or minimal reproduction before editing.
 
 Examples:
+
 - `scripts/smoke-test.sh`
 - `pnpm verify`
 - `(cd apps/api && set -a && . ../../.env && set +a && pnpm db:seed)`
@@ -43,6 +45,7 @@ Examples:
 - Read the code path and the closest tests or scripts that already validate the feature.
 
 For this repo, especially verify:
+
 - Prisma schema and seed scripts
 - Fastify route/auth/plugin patterns
 - env loading and Prisma CLI behavior
@@ -55,6 +58,7 @@ For this repo, especially verify:
 A fix should explain the actual failure mode, not just the symptom.
 
 Check for repo-specific traps before editing:
+
 - stale `tsx watch` or `preflight.cjs` processes may keep old code alive
 - Prisma CLI needs `.env` loaded explicitly for db commands
 - `prisma db push` can block in CI/non-TTY without `--accept-data-loss`
@@ -74,6 +78,7 @@ Check for repo-specific traps before editing:
 Use the repo's intended checks, then stop only when they pass.
 
 Minimum verification paths:
+
 - `pnpm verify` for the full default gate
 - `scripts/schema-audit.sh` when Prisma or seed data changed
 - `scripts/smoke-test.sh` for API behavior
@@ -81,6 +86,7 @@ Minimum verification paths:
 - `realtime-test.mjs` when the realtime module is affected
 
 Important repo conventions:
+
 - run `pnpm --filter @easytrip/web build` before mobile CSS checks
 - if a stale dev server is suspected, clear it before restarting: `pkill -f 'tsx watch'; pkill -f preflight.cjs`
 - for Prisma CLI tasks, load the root env explicitly: `(cd apps/api && set -a && . ../../.env && set +a && ...)`
@@ -88,6 +94,7 @@ Important repo conventions:
 ### 6. Review the final evidence before finishing
 
 Only finish when all of the following are true:
+
 - the root cause is identified and the fix matches it
 - the relevant verification command exited successfully
 - no stale watchers or environment drift are masking the result
@@ -96,26 +103,31 @@ Only finish when all of the following are true:
 ## Decision points
 
 ### If the issue is schema-driven
+
 - check the Prisma model, seed script, and consumer code together
 - run `scripts/schema-audit.sh`
 - confirm that each new field has a valid reader, not just a writer
 
 ### If the issue is runtime API logic
+
 - check route/auth/plugin flow in `apps/api/src`
 - verify the request lifecycle and Fastify behavior before patching
 - re-run smoke checks or the relevant route flow
 
 ### If the issue is UI or frontend behavior
+
 - verify the App Router constraints and built CSS conditions
 - use the actual web build and smoke flow, not ad hoc assumptions
 
 ### If the issue involves tickets, money, or payments
+
 - validate the domain model and generated artifacts before considering it fixed
 - do not accept `0` or empty values as “not set” unless the code explicitly distinguishes them
 
 ## Completion checks
 
 A task is only complete when:
+
 1. the reproduction or failing signal is understood
 2. the root cause has been stated clearly
 3. the fix addresses the root cause, not just the visible symptom
@@ -132,6 +144,7 @@ A task is only complete when:
 ## Related customizations
 
 Consider pairing this skill with:
+
 - a repo playbook for project facts and pitfalls
 - a schema/seed validation instruction for Prisma-heavy changes
 - a release-verification prompt for final QA passes

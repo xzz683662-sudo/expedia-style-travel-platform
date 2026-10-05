@@ -79,7 +79,15 @@ function createClient(): Redis | MemoryRedis {
   const redis = new Redis(config.redisUrl, {
     lazyConnect: true,
     maxRetriesPerRequest: 2,
-    enableOfflineQueue: false,
+    // Commands issued before the socket is up must wait rather than fail. With
+    // this off, `redis.connect()` is still in flight when the first `cacheSet`
+    // runs and the write is rejected with "Stream isn't writeable" — silently,
+    // because `cacheSet` is best-effort. That is how a warmer can report every
+    // route warmed while nothing is actually stored.
+    //
+    // The queue is bounded by `maxRetriesPerRequest`, so a genuinely dead Redis
+    // still fails fast rather than hanging a request handler forever.
+    enableOfflineQueue: true,
     retryStrategy: (times) => (times > 3 ? null : Math.min(times * 200, 2000)),
   });
 

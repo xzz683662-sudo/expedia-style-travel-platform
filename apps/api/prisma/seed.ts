@@ -335,6 +335,15 @@ async function main() {
           basePriceCents: variant.basePriceCents,
           compareAtCents: variant.compareAtCents ?? null,
           costCents: variant.costCents,
+          // Present in `update` as well as `create`. Omitting it here meant the
+          // seed's own configuration was the only thing that could set a
+          // currency: re-seeding after moving the platform to a single currency
+          // rewrote every price and left all 677 rows denominated in whatever
+          // they were created with. A seed that cannot re-apply its own
+          // configuration is not idempotent, and the two columns have to move
+          // together — a new `basePriceCents` in a stale currency is a wrong
+          // price, not a neutral one.
+          currency: variant.currency ?? 'USD',
           taxBps: variant.taxBps ?? 0,
           feeBps: variant.feeBps ?? 0,
           inventoryMode: (variant.inventoryMode ?? 'PER_DATE') as InventoryMode,
