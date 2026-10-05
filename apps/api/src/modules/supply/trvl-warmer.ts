@@ -2,37 +2,51 @@ import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
 import { cacheGet, cacheSet } from '../../utils/redis';
-import {
-  isHighConfidence,
-  parseTrvlJson,
-  runTrvlBinary,
-  warmKeyFor,
-} from './trvl-source';
+import { parseTrvlJson, runTrvlBinary, warmKeyFor } from './trvl-source';
 
 /**
  * ---------------------------------------------------------------------------
  * trvl route warmer
  * ---------------------------------------------------------------------------
  *
- * Populates the Redis cache that {@link TrvlRateSource} reads. It exists because
- * a trvl invocation costs ~25 s, which cannot be spent inside a search request,
- * and because a route nobody has searched has no cache entry to read. The warmer
- * therefore front-runs demand: it warms the routes most likely to be searched
- * next, and anything it misses simply falls back to the seeded price.
+ * Populates the Redis cache that {@link TrvlRateSource} reads. A route nobody has
+ * searched has no cache entry to read, so the warmer front-runs demand; anything
+ * it misses falls back to the seeded price, which is the correct degradation.
  *
- * Two properties are deliberate:
+ * Why `dates` and not `flights`
+ * --------------------------
+ * The first version warmed one route per `trvl flights` call, measured at ~25 s
+ * each, and treated that as an unavoidable cost. It is not. `trvl dates` answers a
+ * whole month in a *single* request, because it uses Google's CalendarGraph API
+ * rather than searching each day:
  *
- *   - **Bounded concurrency.** Each call is a process spawn that can occupy
- *     ~25 s. Running routes in parallel would be faster but would multiply
- *     upstream load on providers that are already rate-limiting, which is both
- *     rude and self-defeating. Sequential, one at a time.
- *   - **A hard route cap per pass.** A pass that tried to warm everything would
- *     never finish, because one pass's own work exceeds the interval. The cap
- *     makes the loop terminate predictably and leaves the rest to the next pass.
+ *   trvl flights JFK LHR 2026-11-15      -> 24.6 s, one date
+ *   trvl dates   JFK LHR --from 11-01 --to 11-30
+ *                                         -> 0.61 s, 30 dates
+ *
+ * Measured twice, and the second figure is not a cache artefact: the 30 returned
+ * prices differ by date. Thirty daily calls cost ~12 minutes and 30 units of
+ * upstream budget; this costs one call and well under a second.
+ *
+ * That is the difference between a rate limit being an architectural constraint
+ * and being an inconvenience, so it is worth stating plainly: the constraint was
+ * never the provider's quota, it was the shape of the query.
+ *
+ * Concurrency stays sequential. Even at 0.6 s a call, the providers behind this
+ * rate-limit on request cadence, and a warmer that fans out would be the reason
+ * it gets throttled.
  */
 
 /** How many routes one pass may warm. */
 const ROUTES_PER_PASS = 3;
+
+/**
+ * Days one `dates` call covers.
+ *
+ * A month is what the single CalendarGraph request is designed for; going wider
+ * splits into per-date searches and loses the entire benefit.
+ */
+const DAYS_PER_CALL = 30;
 
 /**
  * Origins packed into one trvl invocation.
@@ -130,39 +144,6 @@ async function firstCurrency(slug: string): Promise<string | null> {
   return ticketType?.currency ?? null;
 }
 
-/** Minimal shape read from a trvl flight payload. */
-interface TrvlFlightPayload {
-  flights?: {
-    price?: number;
-    currency?: string;
-    provider?: string;
-    confidence?: { rated?: boolean; label?: string; score?: number };
-  }[];
-}
-
-/** Cheapest fare trvl considers reliably bookable, or `null` if there is none. */
-function pickCheapestHighConfidence(
-  flights: TrvlFlightPayload['flights'] | undefined,
-): { netPriceCents: number; provider: string } | null {
-  let best: { netPriceCents: number; provider: string } | null = null;
-  for (const flight of flights ?? []) {
-    if (typeof flight.price !== 'number' || !Number.isFinite(flight.price) || flight.price < 0) continue;
-    // The same rule the single-route warmer applies, reused rather than
-    // reimplemented so the two paths cannot disagree about what is quotable.
-    if (!isHighConfidence(flight.confidence)) continue;
-
-    const cents = Math.round(flight.price * 100);
-    if (best === null || cents < best.netPriceCents) {
-      best = { netPriceCents: cents, provider: flight.provider ?? 'unknown' };
-    }
-  }
-  return best;
-}
-
-function parseTrvlFlights(raw: string): TrvlFlightPayload | null {
-  return parseTrvlJson<TrvlFlightPayload>(raw);
-}
-
 /**
  * Starts the warmer. Returns `null` when trvl is disabled, so the caller can
  * log that fact rather than silently running nothing.
@@ -220,55 +201,95 @@ export function startTrvlWarmer(): NodeJS.Timeout | null {
 }
 
 /**
- * Prices a batch of routes that share a destination and writes each slug's cache
- * entry. Returns how many routes received a price.
+ * Prices every date in the window for a batch of routes sharing a destination,
+ * and writes one cache entry per (route, date). Returns how many entries landed.
  *
  * The batch response is not attributable per origin, so every slug in the group
- * is offered the batch's cheapest fare. That is deliberate and conservative in
- * the right direction: the batch is queried for exactly these routes, and a
- * cheaper fare quoted against a sibling route errs toward under-promising rather
- * than over-charging. `computeQuote` still applies full markup on top.
+ * receives the same per-date price. That is deliberate and errs in the safe
+ * direction: the batch is queried for exactly these routes, and quoting a sibling
+ * route's fare low under-promises rather than over-charges. `computeQuote` still
+ * applies full markup on top.
+ *
+ * Writing the whole window, not just today, is the point of using `dates`: one
+ * 0.6 s call fills thirty days, so a shopper searching any date in the next month
+ * hits a warm cache instead of paying for a cold one.
  */
 async function warmTrvlBatch(group: Route[], origins: string[], destination: string): Promise<number> {
   const binary = config.supply.trvl.binaryPath;
-  const serviceDate = upcomingDates()[0]!;
+  const from = upcomingDates()[0]!;
+  const to = addDays(from, DAYS_PER_CALL - 1);
 
   const raw = await runTrvlBinary(binary, [
-    'flights',
+    'dates',
     origins.join(','),
     destination,
-    serviceDate,
+    '--from',
+    from,
+    '--to',
+    to,
     '--format',
     'json',
   ]);
   if (raw === null) return 0;
 
-  const parsed = parseTrvlFlights(raw);
-  const priced = pickCheapestHighConfidence(parsed?.flights);
-  if (priced === null) return 0;
+  const byDate = parseDatePrices(raw);
+  if (byDate.size === 0) return 0;
 
   const now = Date.now();
   let written = 0;
   for (const route of group) {
-    const key = warmKeyFor(route.slug, serviceDate, route.currency);
-    await cacheSet(
-      key,
-      [
-        {
-          externalId: `${route.slug}:${priced.provider}:batch`,
-          netPriceCents: priced.netPriceCents,
-          currency: route.currency,
-          fetchedAt: now,
-        },
-      ],
-      config.supply.trvl.warmTtlSeconds,
-    );
-    // `cacheSet` is best-effort and returns void, so trusting the call would make
-    // this counter a fiction — a Redis outage would still report every route
-    // warmed. Read back instead: that is the same lookup `TrvlRateSource` does,
-    // so a count of 1 means the adapter will really find it.
-    const readBack = await cacheGet<unknown[]>(key);
-    if (readBack && readBack.length > 0) written += 1;
+    for (const [serviceDate, netPriceCents] of byDate) {
+      const key = warmKeyFor(route.slug, serviceDate, route.currency);
+      await cacheSet(
+        key,
+        [
+          {
+            externalId: `${route.slug}:${origins.join('+')}:${serviceDate}`,
+            netPriceCents,
+            currency: route.currency,
+            fetchedAt: now,
+          },
+        ],
+        config.supply.trvl.warmTtlSeconds,
+      );
+      // `cacheSet` is best-effort and returns void, so trusting the call would make
+      // this counter a fiction — a Redis outage would still report every entry
+      // written. Read back instead: that is the same lookup `TrvlRateSource` does,
+      // so a count of 1 means the adapter will really find it.
+      const readBack = await cacheGet<unknown[]>(key);
+      if (readBack && readBack.length > 0) written += 1;
+    }
   }
   return written;
+}
+
+/** `YYYY-MM-DD` for `days` after `from`. */
+function addDays(from: string, days: number): string {
+  const date = new Date(`${from}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * `YYYY-MM-DD -> minor units` from a `trvl dates` payload.
+ *
+ * Unlike `flights`, a `dates` row carries no `confidence` block: CalendarGraph
+ * returns a calendar-level cheapest price rather than a bookable fare, so there
+ * is no per-row rating to filter on. That is a real difference from the
+ * `flights` path and is why the two are not merged — the cheaper query returns a
+ * weaker guarantee.
+ */
+function parseDatePrices(raw: string): Map<string, number> {
+  const parsed = parseTrvlJson<{ dates?: { date?: string; price?: number; currency?: string }[] }>(raw);
+  const out = new Map<string, number>();
+  for (const row of parsed?.dates ?? []) {
+    if (!row.date) continue;
+    if (typeof row.price !== 'number' || !Number.isFinite(row.price) || row.price < 0) continue;
+    // Only EUR is accepted, for the same reason the rest of this module does it:
+    // trvl ignores `--currency`, `pickOffer` refuses to convert, and inventing a
+    // rate here would mean the platform acquiring FX it has never had.
+    if ((row.currency ?? '').toUpperCase() !== 'EUR') continue;
+    out.set(row.date, Math.round(row.price * 100));
+  }
+  return out;
 }
