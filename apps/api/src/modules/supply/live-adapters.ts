@@ -1,3 +1,4 @@
+import { KiwiRateSource } from './kiwi-source';
 import { LiveRateFinder, type LiveAvailability, type LiveCategory, type LiveOffer, type LiveRateQuery, type LiveRateSource } from './live';
 
 /**
@@ -5,37 +6,44 @@ import { LiveRateFinder, type LiveAvailability, type LiveCategory, type LiveOffe
  * Live rate adapters
  * ---------------------------------------------------------------------------
  *
- * Shipped in Phase 1: the seam only. No commercial adapter is wired yet, and
- * that is a deliberate, documented state rather than an unfinished one.
+ * `docs/supply-sources.md` states the core constraint in the repo's own words:
+ * *"Schedule, fare and seat inventory cannot come from open data at all. They
+ * are regulated commercial assets airlines distribute through GDS/NDC partners;
+ * there is no free, licence-clean, commercially redistributable source."*
  *
- * Why there is no rate adapter
- * ----------------------------
- * `docs/supply-sources.md` states it in the repo's own words: *"Schedule, fare
- * and seat inventory cannot come from open data at all. They are regulated
- * commercial assets airlines distribute through GDS/NDC partners; there is no
- * free, licence-clean, commercially redistributable source."*
+ * That was re-verified against live upstreams on 2026-10-05, because the
+ * freshness rule in that document requires probing a source before trusting it:
  *
- * That was re-verified against live upstreams on 2026-10-04 rather than taken
- * on trust, because the freshness rule in that document requires probing the
- * source before trusting it:
+ *   GET api.amadeus.com/v1/security/oauth2/token
+ *     -> JSON "blocked by our security service" (self-service portal was
+ *        decommissioned 2025-07-17; enterprise access is by sales agreement)
+ *   GET tequila-api.kiwi.com/v2/search?fly_from=SFO
+ *     -> 403 {"error_code":403,"message":"'apikey' header is required"}
+ *        (alive, credential enforced, partner agreement required)
+ *   GET api.kiwi.com/v2/search
+ *     -> Could not resolve host (no such hostname)
  *
- *   GET api.adsb.lol/v2/point/51.47/-0.45/10  -> 200  (positions only)
- *   GET api.adsb.lol/v2/callsign/DAL112      -> 200  (positions only)
- *   GET api.adsb.lol/v2/route/LHR/JFK        -> 503  (no route-level data)
- *   GET api.adsbdb.com/v0/aircraft/G-XLEA    -> 200  (registry metadata only)
+ * Open endpoints were probed at the same time and still return position or
+ * metadata only — never a fare, a seat count or a room allotment:
  *
- * Every reachable endpoint carries position or registry metadata. None carries
- * a fare, a seat count or a room allotment. Wiring an adapter to them would mean
- * inventing commercial terms, which is precisely the failure mode that erodes
- * trust in a checkout funnel.
+ *   GET opensky-network.org/api/states/all  -> 200 (positions)
+ *   GET api.adsb.lol/v2/point/...            -> 503 at time of check
+ *   GET api.open-meteo.com/v1/forecast      -> 200 (weather, commercial terms absent)
+ *   GET en.wikipedia.org/api/rest_v1/...     -> 200 (descriptive content)
  *
- * So the correct adapter today is one that declines. It returns `[]`, which the
- * resolver reads as "this source carries no data" rather than "unavailable", and
- * the caller falls back to `TicketType.basePriceCents`. Content real-time
- * (Phase 2) uses the proven 200s above and is independent of this file.
+ * So the one adapter wired here is {@link KiwiRateSource}, a *metasearch
+ * aggregator* rather than an inventory holder. What that means is stated in its
+ * own docs: it moves the price the shopper is quoted, and it does not create a
+ * confirmed upstream reservation. It also returns no availability, because
+ * fabricating capacity from a nightly price would sell seats the platform never
+ * confirmed.
  *
- * Adding a real commercial source later means: implement `getRates`, append it
- * to {@link liveRateSources}, and set `SUPPLY_LIVE_ENABLED=true`. No call site
+ * {@link NoCommercialRateSource} stays last: it cannot answer anything, so its
+ * position costs nothing, and its presence is what lets `degraded` distinguish
+ * "no source answered" (true) from "the layer is switched off" (false).
+ *
+ * Adding a further real source means: implement `getRates`, append it to
+ * {@link liveRateSources}, and set `SUPPLY_LIVE_ENABLED=true`. No call site
  * changes — that is the entire point of the interface.
  */
 
@@ -72,7 +80,10 @@ export class NoCommercialRateSource implements LiveRateSource {
  * Exported so `prisma/live-rate-probe.ts` can walk the chain and probe each
  * adapter individually rather than only exercising the composed resolver.
  */
-export const liveRateSources: readonly LiveRateSource[] = [new NoCommercialRateSource()];
+export const liveRateSources: readonly LiveRateSource[] = [
+  new KiwiRateSource(),
+  new NoCommercialRateSource(),
+];
 
 /**
  * The live rate chain, and the only instance the API should use.

@@ -89,6 +89,29 @@ export const config = {
         .map((host) => host.trim())
         .filter(Boolean),
     },
+
+    /**
+     * Per-provider credentials.
+     *
+     * An adapter is wired into {@link liveRateSources} unconditionally, but it
+     * only answers when its credential is present: `getRates` returns `[]`
+     * otherwise, which the resolver reads as "this source carries no data"
+     * rather than as an error. That keeps the chain free of `if (enabled)`
+     * branches at the call site and means a deployment with no commercial
+     * credentials behaves exactly as it did before any adapter existed.
+     *
+     * Every value here was verified against the live upstream on 2026-10-05;
+     * see `docs/supply-sources.md` for the per-provider evidence.
+     */
+    kiwi: {
+      /** Tequila API key. Partner registration is by email magic link. */
+      apiKey: str('KIWI_API_KEY'),
+      baseUrl: str('KIWI_BASE_URL', 'https://tequila-api.kiwi.com'),
+    },
+    serpapi: {
+      apiKey: str('SERPAPI_API_KEY'),
+      baseUrl: str('SERPAPI_BASE_URL', 'https://serpapi.com'),
+    },
   },
 
   storage: {

@@ -2,6 +2,8 @@ import { ProductStatus, ProductType, type Prisma } from '@prisma/client';
 import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
+import { liveRates } from '../supply/live-adapters';
+import type { LiveCategory } from '../supply/live';
 import { eachDay, formatServiceDate, toServiceDate } from '../../utils/date';
 
 /**
@@ -252,8 +254,110 @@ async function resolveAvailabilityAndPrice(
 
   await addBundleAvailability(result, bundleProductIds, dates, requestedDates);
 
+  await applyLiveRates(result, ticketTypes);
+
   return result;
 }
+
+/**
+ * Overlays live upstream net rates onto the resolved search prices.
+ *
+ * Ordering matters and is the whole point of this function:
+ *
+ *   1. **Availability is decided before this runs.** `InventoryRecord` above is
+ *      the only authority on whether anything is sellable. No live source in the
+ *      chain reports a trustworthy allotment, and one that did would be advisory
+ *      anyway — a source can prove "sold out", never "in stock".
+ *   2. **A live price only ever replaces the number a live quote returned.** A
+ *      `null` quote (no source configured, or all sources down) leaves the
+ *      seeded `basePriceCents` untouched, so search behaves exactly as it did
+ *      before this layer existed.
+ *   3. **The value stored is a cost, not a retail price.** `minPriceCents` is
+ *      compared against `TicketType.basePriceCents` upstream, which is itself a
+ *      pre-markup cost, so substituting a net rate here keeps the comparison
+ *      like-for-like. Platform markup, tax and fee are applied later by
+ *      `computeQuote`, exactly as for a seeded price.
+ *
+ * Failure is absorbed rather than propagated: a live layer that throws would
+ * otherwise take the whole search endpoint down, which is a far worse outcome
+ * than quoting a slightly stale number.
+ */
+async function applyLiveRates(
+  prices: Map<string, { minPriceCents: number; compareAtCents: number | null; nextDate: string | null; availableQty: number }>,
+  ticketTypes: { id: string; productId: string }[],
+): Promise<void> {
+  if (!liveRates.enabled || prices.size === 0) return;
+
+  // One live lookup per product, not per ticket type: the upstream answers per
+  // product/date, and asking twice for the same row is how rate limits and
+  // inconsistent prices between variants of one product are introduced.
+  const productById = new Map<string, string>();
+  for (const ticketType of ticketTypes) {
+    if (!productById.has(ticketType.productId)) productById.set(ticketType.productId, ticketType.id);
+  }
+
+  const settled = await Promise.all(
+    [...prices.keys()].map(async (productId) => {
+      const entry = prices.get(productId);
+      const ticketTypeId = productById.get(productId);
+      if (!entry || !ticketTypeId) return null;
+
+      // Slug and currency are both required by `LiveRateQuery`, and neither can
+      // be invented here — so they are read from the product and its ticket
+      // type rather than guessed. This costs one indexed lookup per product,
+      // which the search index already does for the same row.
+      const product = await prisma.product.findUnique({
+        where: { id: productId },
+        select: { slug: true, type: true },
+      });
+      if (!product) return null;
+
+      const currency = await prisma.ticketType.findUnique({
+        where: { id: ticketTypeId },
+        select: { currency: true },
+      });
+      if (!currency) return null;
+
+      const category = LIVE_CATEGORY_BY_PRODUCT_TYPE.get(product.type);
+      if (!category) return null;
+
+      const result = await liveRates.resolve(
+        {
+          slug: product.slug,
+          category,
+          serviceDate: entry.nextDate ?? new Date().toISOString().slice(0, 10),
+          quantity: 1,
+          currency: currency.currency,
+        },
+        'search',
+      );
+
+      // `quote === null` means "no source answered", not "unavailable" — leave
+      // the seeded price alone. `degraded` is surfaced on the hit for support.
+      return result.quote
+        ? { productId, netPriceCents: result.quote.netPriceCents, degraded: result.degraded }
+        : { productId, netPriceCents: null, degraded: result.degraded };
+    }),
+  );
+
+  for (const outcome of settled) {
+    if (!outcome || outcome.netPriceCents === null) continue;
+    const entry = prices.get(outcome.productId);
+    if (!entry) continue;
+    entry.minPriceCents = outcome.netPriceCents;
+  }
+}
+
+/**
+ * Only the three categories the live layer carries. Attractions and everything
+ * else keep their seeded price, because no source in the chain prices them and
+ * guessing would be worse than not answering.
+ */
+const LIVE_CATEGORY_BY_PRODUCT_TYPE = new Map<ProductType, LiveCategory>([
+  [ProductType.FLIGHT, 'FLIGHT'],
+  [ProductType.HOTEL_ROOM, 'HOTEL_ROOM'],
+  [ProductType.CRUISE, 'CRUISE'],
+]);
 
 /**
  * Folds component availability up into each bundle.

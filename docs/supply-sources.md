@@ -122,6 +122,74 @@ Evaluated and **not** wired:
 - `aviationstack` — alive but key-gated; the free tier is too small to be a
   dependable fallback.
 
+## Live rate sources (commercial terms)
+
+A third kind of source: **paid inventory and rates**. Adapter chain lives in
+`apps/api/src/modules/supply/live-adapters.ts`, contract in
+`modules/supply/live.ts`, and search consumes it via `applyLiveRates` in
+`modules/search/service.ts`.
+
+Every endpoint below was probed with `curl` on **2026-10-05**. The responses are
+quoted verbatim because the difference between them is the whole story:
+
+| id | endpoint | probed response | meaning |
+| --- | --- | --- | --- |
+| `kiwi.tequila` | `tequila-api.kiwi.com/v2/search?fly_from=SFO` | `403 {"error_code":403,"message":"'apikey' header is required"}` | **Alive, credential enforced.** Partner registration is by email magic link, not self-service |
+| `amadeus` | `api.amadeus.com/v1/security/oauth2/token` | `200` + `{"errorCode":"15","description":"This request was blocked by our security service"}` | Endpoint exists, but the **self-service portal was decommissioned 2025-07-17**; access is now an enterprise sales agreement |
+| `kiwi.v2` | `api.kiwi.com/v2/search` | `Could not resolve host` | No such hostname — the v2 API is not served there |
+| `serpapi` | `serpapi.com/search?engine=google_flights&api_key=test` | `401 {"error":"Invalid API key…"}` | Alive, key-gated. Configured but **not wired** — see below |
+
+### What `kiwi.tequila` does and does not do
+
+Wired as the first adapter in the chain. It is a **metasearch aggregator**: its
+prices are what Kiwi found across the OTA landscape, not stock this platform
+holds. Three limits are load-bearing and must not be quietly dropped:
+
+- **No availability.** Tequila publishes no per-date allotment, so
+  `getAvailability` returns `[]` by design. `InventoryRecord` and
+  `InventoryHold` remain the only authority on sellability. Inventing a capacity
+  from a nightly price would sell seats nobody confirmed.
+- **Sellability is `null`, never `0`.** Every offer reports "the source did not
+  say". `bookable: false` is the one negative signal Kiwi gives, and only that
+  becomes a real zero.
+- **No confirmed booking.** A Tequila price moves the number the shopper is
+  quoted. It does **not** create a supplier reservation, because no supplier
+  relationship exists behind it. Tequila is not an inventory holder and must not
+  be presented as one.
+
+Prices enter as `computeQuote`'s `basePriceCents` — a cost, never a retail price —
+so platform markup, tax and fee stay owned by `modules/pricing`.
+
+### Why SerpApi is configured but not wired
+
+`SERPAPI_API_KEY` is read by `config/env.ts` so the credential can be added
+without a code change, but no adapter consumes it yet. It returns Google Flights
+and Google Hotels results by scraping Google. That is technically straightforward
+and commercially unclean: it is not an authorised redistribution channel, and
+nothing in this repo's licensing currently permits it. Wiring it is a business
+decision, not a technical one — record the decision here first.
+
+### Cruise
+
+**No source is available, and none is stubbed.** Google has no cruise aggregator,
+and each operator (Royal Caribbean, MSC, Carnival…) sells through its own agency
+channel. Until an operator agreement exists, `CRUISE` prices come from
+`TicketType.basePriceCents` and search says nothing false about them. This is a
+known gap, not an oversight — building a per-operator scraper to fill it would
+cost far more in maintenance than the category currently earns.
+
+### Open endpoints carry no commercial terms
+
+Re-probed alongside the above, all reachable, none usable for rates:
+
+    opensky-network.org/api/states/all  -> 200 (positions)
+    api.adsb.lol/v2/point/...            -> 503 at time of check
+    api.open-meteo.com/v1/forecast      -> 200 (weather; no fare or allotment)
+    en.wikipedia.org/api/rest_v1/...     -> 200 (descriptive content only)
+
+Content-real-time work uses the last two. They inform what a product page *says*,
+never what it *costs* or whether it can be sold.
+
 ### What the content sources cannot answer
 
 Two limits were established by probing, and both constrain what "live content"
