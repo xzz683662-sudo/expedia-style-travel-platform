@@ -163,6 +163,11 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
   request never found a warmed entry — a full cache and zero hits.
 - `trvl dates` is single-origin only: a comma-joined origin returns 0 rows for 11–30 s.
   A same-airport route (`DXB→DXB`) cost 56 s for nothing. Both are filtered out.
+- **`TRVL_BINARY_PATH` must be `existsSync`-checked.** It points into a scratch dir and
+  `/tmp` does not survive a restart. A non-empty path that does not exist produced one
+  `spawn ENOENT` per route per pass — 34 identical lines, 15 minutes apart. Note
+  `execFile` reports a missing binary as a *callback error*, not a throw, so only a
+  caller-side check prevents the storm.
 
 ### Search: Postgres is the engine; `pnpm db:indexes` owns the trigram indexes
 
