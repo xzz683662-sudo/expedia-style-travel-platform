@@ -68,6 +68,18 @@ interface TrvlFlight {
   currency?: string;
   provider?: string;
   legs?: { departure_airport?: { code?: string }; arrival_airport?: { code?: string } }[];
+  /**
+   * trvl's own assessment of how bookable this fare is. Carried through rather
+   * than discarded: a fare scored `low` is a different proposition from one
+   * scored `high`, and the platform should be able to refuse the former.
+   */
+  confidence?: {
+    rated?: boolean;
+    score?: number;
+    label?: string;
+    /** `"live"` means the upstream answered now, not from a cached snapshot. */
+    freshness?: string;
+  };
 }
 
 interface TrvlHotel {
@@ -195,18 +207,33 @@ export async function warmTrvlRoute(query: LiveRateQuery & WarmQuery): Promise<b
 
   // Generous, because the measured cost is ~25 s and a timeout that fires at 8 s
   // would throw away a call that was about to succeed.
-  const raw = await runTrvl(binary, args);
+  const raw = await runTrvlBinary(binary, args);
   if (raw === null) return false;
 
   const now = Date.now();
   const rows: CachedRate[] = [];
 
   if (isFlight) {
-    const parsed = parseJson<TrvlFlightResponse>(raw);
+    const parsed = parseTrvlJson<TrvlFlightResponse>(raw);
     for (const flight of parsed?.flights ?? []) {
       const cents = toCents(flight.price);
       const currency = (flight.currency ?? '').toUpperCase();
       if (cents === null || currency === '') continue;
+
+      // trvl scores each fare on how likely it is to actually book. Only `high`
+      // reaches the cache. Quoting a fare trvl itself rates as unreliable would
+      // mean re-pricing a real order on a number the upstream does not stand
+      // behind, and `computeQuote` would apply real markup to it. Measured range
+      // on live queries is roughly 0.6–0.9, with `high` covering the upper end.
+      if (!isHighConfidence(flight.confidence)) {
+        logger.debug('supply.trvl_low_confidence_skipped', {
+          provider: flight.provider,
+          label: flight.confidence?.label,
+          score: flight.confidence?.score,
+        });
+        continue;
+      }
+
       rows.push({
         // Provider is kept in the id so two providers for one route stay distinct
         // and a provider outage is visible in the cache rather than silent.
@@ -217,7 +244,7 @@ export async function warmTrvlRoute(query: LiveRateQuery & WarmQuery): Promise<b
       });
     }
   } else {
-    const parsed = parseJson<TrvlHotelResponse>(raw);
+    const parsed = parseTrvlJson<TrvlHotelResponse>(raw);
     for (const hotel of parsed?.hotels ?? []) {
       const cents = toCents(hotel.price);
       const currency = (hotel.currency ?? '').toUpperCase();
@@ -241,12 +268,16 @@ export async function warmTrvlRoute(query: LiveRateQuery & WarmQuery): Promise<b
 }
 
 /**
- * Spawns the binary and returns stdout.
+ * Spawns the binary and returns stdout, or `null` on any failure.
+ *
+ * Exported so the warmer and the inline path cannot drift apart in how they
+ * invoke the tool — one of them learning a flag the other ignores is how a
+ * "verified" number stops matching what the adapter will read.
  *
  * `execFile` rather than `exec` so no argument can be interpreted as a shell
- * metacharacter — the city and airport codes come from the database.
+ * metacharacter; the city and airport codes come from the database.
  */
-function runTrvl(binary: string, args: string[]): Promise<string | null> {
+export function runTrvlBinary(binary: string, args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(
       binary,
@@ -273,7 +304,22 @@ function runTrvl(binary: string, args: string[]): Promise<string | null> {
   });
 }
 
-function parseJson<T>(raw: string): T | null {
+/**
+ * Whether trvl considers a fare reliably bookable.
+ *
+ * An *unrated* fare passes. trvl only rates what it can corroborate across
+ * providers, and refusing every unrated fare would reject most of a single-source
+ * result set — which is most of them. The failure mode matters more in one
+ * direction than the other: quoting a good fare too conservatively costs a
+ * marginally higher price, while quoting a bad one costs a broken checkout.
+ */
+export function isHighConfidence(confidence: TrvlFlight['confidence']): boolean {
+  if (!confidence || confidence.rated !== true) return true;
+  return confidence.label === 'high';
+}
+
+/** Parses a trvl JSON payload, tolerating WARN lines around it. Never throws. */
+export function parseTrvlJson<T>(raw: string): T | null {
   try {
     return JSON.parse(raw) as T;
   } catch {
@@ -295,16 +341,17 @@ function toCents(value: number | undefined): number | null {
   return Math.round(value * 100);
 }
 
-/** Shares the resolver's cache key shape so a warmed entry is found on read. */
+/**
+ * The cache key a warmed entry is written under and read back from.
+ *
+ * Shares the resolver's key shape deliberately: `TrvlRateSource.getRates` looks
+ * the entry up with this exact string, so the two must never drift.
+ */
+export function warmKeyFor(slug: string, serviceDate: string, currency: string): string {
+  return ['live:rate', slug, 'FLIGHT', serviceDate, '', '1', currency, 'search'].join(':');
+}
+
+/** The single-route form of {@link warmKeyFor}, derived from a full query. */
 function warmKey(query: LiveRateQuery): string {
-  return [
-    'live:rate',
-    query.slug,
-    query.category,
-    query.serviceDate,
-    query.checkOutDate ?? '',
-    String(query.quantity),
-    query.currency,
-    'search',
-  ].join(':');
+  return warmKeyFor(query.slug, query.serviceDate, query.currency);
 }

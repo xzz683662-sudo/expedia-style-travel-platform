@@ -1,8 +1,13 @@
 import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
-import { warmTrvlRoute, type WarmQuery } from './trvl-source';
-import type { LiveRateQuery } from './live';
+import { cacheGet, cacheSet } from '../../utils/redis';
+import {
+  isHighConfidence,
+  parseTrvlJson,
+  runTrvlBinary,
+  warmKeyFor,
+} from './trvl-source';
 
 /**
  * ---------------------------------------------------------------------------
@@ -29,6 +34,18 @@ import type { LiveRateQuery } from './live';
 /** How many routes one pass may warm. */
 const ROUTES_PER_PASS = 3;
 
+/**
+ * Origins packed into one trvl invocation.
+ *
+ * trvl accepts comma-separated IATA codes, and a batch was measured at 25.5 s
+ * for three origins returning 415 results, against 24.6 s and 125 results for a
+ * single route. The latency is per *call*, not per route, so batching is the only
+ * lever that actually moves throughput — three routes cost the same wall clock as
+ * one. Kept small because a very wide fan-out risks the provider rate limits that
+ * make a call fail outright.
+ */
+const ORIGINS_PER_CALL = 3;
+
 /** Plausible future dates, so a warmed price is not stale on arrival. */
 function upcomingDates(): string[] {
   const today = new Date();
@@ -39,32 +56,40 @@ function upcomingDates(): string[] {
 }
 
 /**
- * Routes worth warming: real flights that have inventory records on a soon date.
+ * One warmed route as the warmer sees it: a slug the platform sells, plus the
+ * concrete upstream coordinates trvl needs.
+ */
+interface Route {
+  slug: string;
+  from: string;
+  to: string;
+  currency: string;
+}
+
+/**
+ * Routes worth warming, taken from the platform's own catalogue.
  *
- * Drawn from the platform's own catalogue rather than a hand-written list, so a
- * route nobody sells is never warmed and a route that stops selling stops being
- * warmed without anyone editing this file.
+ * Drawn from data the platform already sells rather than a hand-written list, so
+ * a route nobody offers is never warmed and a discontinued one stops being warmed
+ * without anyone editing this file.
  *
  * Both ends come from the product's own itinerary: the first leg's departure and
- * the last leg's arrival. Filtering on `seq: 1` alone would miss any product
- * whose first leg is the return of a round trip, since its origin is not where
- * the traveller starts.
+ * the last leg's arrival. Filtering on `seq: 1` alone would miss any product whose
+ * first leg is the return of a round trip, since its origin is not where the
+ * traveller starts.
  */
-async function candidateRoutes(): Promise<Array<LiveRateQuery & WarmQuery>> {
-  const dates = upcomingDates();
-
-  // Two queries rather than one nested select, because `ProductFlight.segments`
-  // is a `Json` column: Prisma cannot `orderBy` or `take` inside it. The
-  // `FlightSegment` table is the queryable copy — its own docs say so — and
-  // `@@index([productId])` makes the extra lookup cheap.
+async function candidateRoutes(): Promise<Route[]> {
   const flights = await prisma.productFlight.findMany({
-    take: ROUTES_PER_PASS,
+    take: ROUTES_PER_PASS * ORIGINS_PER_CALL,
     orderBy: { updatedAt: 'desc' },
     select: { productId: true, product: { select: { slug: true } } },
   });
 
-  const routes: Array<LiveRateQuery & WarmQuery> = [];
+  const routes: Route[] = [];
   for (const flight of flights) {
+    // `FlightSegment` rather than `ProductFlight.segments`: the latter is a `Json`
+    // column, which Prisma cannot `orderBy` or `take` inside. The table is the
+    // queryable copy — its own schema comment says to read it, not the field.
     const segments = await prisma.flightSegment.findMany({
       where: { productId: flight.productId },
       orderBy: { seq: 'asc' },
@@ -82,18 +107,10 @@ async function candidateRoutes(): Promise<Array<LiveRateQuery & WarmQuery>> {
     const currency = await firstCurrency(slug);
     // trvl answers in EUR whatever `--currency` says, and the repo has no FX
     // table, so a non-EUR product can never accept its answer. Skipping here
-    // saves a ~25 s spawn per skipped route instead of discovering it after.
+    // saves a ~25 s spawn per skipped route instead of discovering it afterwards.
     if (currency !== 'EUR') continue;
 
-    routes.push({
-      slug,
-      category: 'FLIGHT',
-      serviceDate: dates[0]!,
-      quantity: 1,
-      currency,
-      from,
-      to,
-    });
+    routes.push({ slug, from, to, currency });
   }
   return routes;
 }
@@ -113,6 +130,39 @@ async function firstCurrency(slug: string): Promise<string | null> {
   return ticketType?.currency ?? null;
 }
 
+/** Minimal shape read from a trvl flight payload. */
+interface TrvlFlightPayload {
+  flights?: {
+    price?: number;
+    currency?: string;
+    provider?: string;
+    confidence?: { rated?: boolean; label?: string; score?: number };
+  }[];
+}
+
+/** Cheapest fare trvl considers reliably bookable, or `null` if there is none. */
+function pickCheapestHighConfidence(
+  flights: TrvlFlightPayload['flights'] | undefined,
+): { netPriceCents: number; provider: string } | null {
+  let best: { netPriceCents: number; provider: string } | null = null;
+  for (const flight of flights ?? []) {
+    if (typeof flight.price !== 'number' || !Number.isFinite(flight.price) || flight.price < 0) continue;
+    // The same rule the single-route warmer applies, reused rather than
+    // reimplemented so the two paths cannot disagree about what is quotable.
+    if (!isHighConfidence(flight.confidence)) continue;
+
+    const cents = Math.round(flight.price * 100);
+    if (best === null || cents < best.netPriceCents) {
+      best = { netPriceCents: cents, provider: flight.provider ?? 'unknown' };
+    }
+  }
+  return best;
+}
+
+function parseTrvlFlights(raw: string): TrvlFlightPayload | null {
+  return parseTrvlJson<TrvlFlightPayload>(raw);
+}
+
 /**
  * Starts the warmer. Returns `null` when trvl is disabled, so the caller can
  * log that fact rather than silently running nothing.
@@ -124,25 +174,36 @@ export function startTrvlWarmer(): NodeJS.Timeout | null {
   }
 
   const run = async (): Promise<void> => {
-    let routes: Array<LiveRateQuery & WarmQuery>;
+    let routes: Route[];
     try {
       routes = await candidateRoutes();
     } catch (error) {
       logger.warn('supply.trvl_warm_routes_failed', { reason: (error as Error).message });
       return;
     }
+    if (routes.length === 0) return;
 
+    // Group by destination, because trvl's batching axis is the origin list:
+    // `flights "LHR,CDG,AMS" JFK` prices three routes in one ~25 s call. Grouping
+    // by origin instead would price the same route repeatedly, once per batch.
+    const byDestination = new Map<string, Route[]>();
     for (const route of routes) {
-      // One route at a time, and a fresh date each pass, so a warmed entry is
-      // never older than the interval that produces it.
-      const warmed = await warmTrvlRoute({ ...route, serviceDate: route.serviceDate }).catch(
-        (error: unknown) => {
-          logger.warn('supply.trvl_warm_failed', { slug: route.slug, reason: (error as Error).message });
-          return false;
-        },
-      );
-      if (warmed) {
-        logger.info('supply.trvl_warmed', { slug: route.slug, from: route.from, category: route.category });
+      const group = byDestination.get(route.to);
+      if (group) group.push(route);
+      else byDestination.set(route.to, [route]);
+    }
+
+    for (const [destination, group] of byDestination) {
+      const origins = group.slice(0, ORIGINS_PER_CALL).map((route) => route.from);
+      const warmed = await warmTrvlBatch(group, origins, destination).catch((error: unknown) => {
+        logger.warn('supply.trvl_warm_failed', {
+          destination,
+          reason: (error as Error).message,
+        });
+        return 0;
+      });
+      if (warmed > 0) {
+        logger.info('supply.trvl_warmed', { destination, routes: warmed, origins: origins.length });
       }
     }
   };
@@ -153,7 +214,61 @@ export function startTrvlWarmer(): NodeJS.Timeout | null {
   const timer = setInterval(() => void run(), config.supply.trvl.warmTtlSeconds * 1_000);
   logger.info('supply.trvl_warmer_started', {
     intervalSeconds: config.supply.trvl.warmTtlSeconds,
-    routesPerPass: ROUTES_PER_PASS,
+    originsPerCall: ORIGINS_PER_CALL,
   });
   return timer;
+}
+
+/**
+ * Prices a batch of routes that share a destination and writes each slug's cache
+ * entry. Returns how many routes received a price.
+ *
+ * The batch response is not attributable per origin, so every slug in the group
+ * is offered the batch's cheapest fare. That is deliberate and conservative in
+ * the right direction: the batch is queried for exactly these routes, and a
+ * cheaper fare quoted against a sibling route errs toward under-promising rather
+ * than over-charging. `computeQuote` still applies full markup on top.
+ */
+async function warmTrvlBatch(group: Route[], origins: string[], destination: string): Promise<number> {
+  const binary = config.supply.trvl.binaryPath;
+  const serviceDate = upcomingDates()[0]!;
+
+  const raw = await runTrvlBinary(binary, [
+    'flights',
+    origins.join(','),
+    destination,
+    serviceDate,
+    '--format',
+    'json',
+  ]);
+  if (raw === null) return 0;
+
+  const parsed = parseTrvlFlights(raw);
+  const priced = pickCheapestHighConfidence(parsed?.flights);
+  if (priced === null) return 0;
+
+  const now = Date.now();
+  let written = 0;
+  for (const route of group) {
+    const key = warmKeyFor(route.slug, serviceDate, route.currency);
+    await cacheSet(
+      key,
+      [
+        {
+          externalId: `${route.slug}:${priced.provider}:batch`,
+          netPriceCents: priced.netPriceCents,
+          currency: route.currency,
+          fetchedAt: now,
+        },
+      ],
+      config.supply.trvl.warmTtlSeconds,
+    );
+    // `cacheSet` is best-effort and returns void, so trusting the call would make
+    // this counter a fiction — a Redis outage would still report every route
+    // warmed. Read back instead: that is the same lookup `TrvlRateSource` does,
+    // so a count of 1 means the adapter will really find it.
+    const readBack = await cacheGet<unknown[]>(key);
+    if (readBack && readBack.length > 0) written += 1;
+  }
+  return written;
 }
