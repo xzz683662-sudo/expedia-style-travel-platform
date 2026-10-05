@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { cacheGet, cacheSet } from '../../utils/redis';
@@ -121,8 +122,20 @@ export class TrvlRateSource implements LiveRateSource {
   readonly license = 'MIT (binary); upstream data terms apply';
   readonly categories: readonly LiveCategory[] = ['FLIGHT', 'HOTEL_ROOM'];
 
+  /**
+   * Whether this source can answer at all.
+   *
+   * Checks that the binary *exists*, not merely that the path is a non-empty
+   * string: `TRVL_BINARY_PATH` normally points at a downloaded file in a
+   * scratch directory, and a configured-but-missing binary would otherwise leave
+   * the adapter believing it had a cache to read, forever.
+   */
   private get configured(): boolean {
-    return config.supply.trvl.enabled && config.supply.trvl.binaryPath.length > 0;
+    return (
+      config.supply.trvl.enabled &&
+      config.supply.trvl.binaryPath.length > 0 &&
+      existsSync(config.supply.trvl.binaryPath)
+    );
   }
 
   /**
@@ -308,6 +321,16 @@ export async function warmTrvlRoute(query: LiveRateQuery & WarmQuery): Promise<b
  * metacharacter; the city and airport codes come from the database.
  */
 export function runTrvlBinary(binary: string, args: string[]): Promise<string | null> {
+  // Proved here as well as in `startTrvlWarmer`: this function is exported and
+  // callable without the warmer having started, and `execFile` reports a missing
+  // binary as an `ENOENT` *callback error* rather than throwing — which the
+  // caller can only handle by logging. One `existsSync` turns a per-route log
+  // storm into a single `false`.
+  if (!existsSync(binary)) {
+    logger.warn('supply.trvl_binary_missing', { binaryPath: binary });
+    return Promise.resolve(null);
+  }
+
   return new Promise((resolve) => {
     execFile(
       binary,

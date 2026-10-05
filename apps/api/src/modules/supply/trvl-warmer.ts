@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
@@ -168,6 +169,20 @@ async function candidateRoutes(): Promise<Route[]> {
 export function startTrvlWarmer(): NodeJS.Timeout | null {
   if (!config.supply.trvl.enabled || config.supply.trvl.binaryPath === '') {
     logger.info('supply.trvl_warmer_disabled');
+    return null;
+  }
+
+  // A configured-but-absent binary is the common case: `TRVL_BINARY_PATH` points
+  // at a download, and `/tmp` does not survive a machine restart. Checking only
+  // that the string is non-empty meant every route logged a `spawn ENOENT` on
+  // every pass — measured at 34 identical failures per pass, 15 minutes apart,
+  // for a source that can never answer. Proving the binary exists *once*, here,
+  // turns that into a single honest log line.
+  if (!existsSync(config.supply.trvl.binaryPath)) {
+    logger.warn('supply.trvl_warmer_disabled', {
+      reason: 'binary not found',
+      binaryPath: config.supply.trvl.binaryPath,
+    });
     return null;
   }
 
