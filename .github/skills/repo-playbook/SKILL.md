@@ -269,7 +269,7 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
 - Auth/role gates are added in `apps/api/src/plugins/auth.ts` — check it before adding a new protected route.
 - Prisma client singleton: `apps/api/src/lib/prisma.ts`. Env schema: `apps/api/src/config/env.ts`.
 - Verify changes with `scripts/smoke-test.sh` (and `realtime-test.mjs` for the realtime module).
-  `pnpm verify` runs typecheck → audit:schema → smoke → realtime → mobile in one shot and must exit **0**.
+  `pnpm verify` runs typecheck → audit:schema → supply:contract → smoke → realtime → mobile in one shot and must exit **0**.
   Baselines re-verified 2026-10-04: typecheck clean on both packages, `audit:schema` reports
   "No dead columns found" (70 models / 542 scalar columns), smoke **92/92**, realtime **18/18**,
   mobile **40/40**.

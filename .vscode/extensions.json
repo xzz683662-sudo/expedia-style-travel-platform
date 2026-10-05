@@ -1,5 +1,7 @@
 {
     "recommendations": [
-        "leizongmin.node-module-intellisense"
+        "leizongmin.node-module-intellisense",
+        "ms-vscode.azure-repos",
+        "donjayamanne.githistory"
     ]
 }

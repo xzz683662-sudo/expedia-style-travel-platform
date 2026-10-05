@@ -23,6 +23,8 @@ The domain model, architecture decisions and the full API reference are in
 | `apps/web/src/app/` | Storefront + `(console)/admin` + `(console)/support` routes |
 | `apps/web/src/lib/` | `api.ts` (typed client), `session.ts`, `i18n/`, `realtime.ts` |
 | `scripts/` | `smoke-test.sh`, `realtime-test.mjs`, `mobile-check.sh`, `schema-audit.sh` |
+| `apps/api/prisma/live-contract-check.ts` | Offline live-rate contract gate (`pnpm supply:contract`) |
+| `apps/api/prisma/live-contract-check.ts` | Offline live-rate contract gate (`pnpm supply:contract`) |
 
 ## Commands
 
@@ -30,7 +32,7 @@ The domain model, architecture decisions and the full API reference are in
 cp .env.example .env && pnpm install
 pnpm setup        # docker compose up + prisma generate/push + seed
 pnpm dev          # API :4000, web :3000
-pnpm verify       # typecheck → schema audit → smoke → realtime → mobile (the real gate)
+pnpm verify       # typecheck → schema audit → live supply contract → smoke → realtime → mobile (the real gate)
 pnpm typecheck    # both packages
 pnpm audit:schema # flags columns written but never read
 ```
@@ -81,4 +83,5 @@ pnpm audit:schema # flags columns written but never read
 | --- | --- |
 | `.github/skills/repo-playbook/SKILL.md` | Project facts, verified commands, pitfalls — load first |
 | `.github/skills/verify-the-change/SKILL.md` | Verification workflow for any change |
+| `.github/skills/live-supply-source/SKILL.md` | Onboarding a live rate source (trvl, Kiwi, partner feed) |
 | `.github/agents/easytrip-verifier.agent.md` | Implement + prove a change against the real gates |

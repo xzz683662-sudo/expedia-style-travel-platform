@@ -1,0 +1,5 @@
+{
+  // Vendored Python virtualenv (`pip`'s bundled licenses). Not part of this
+  // repo's source and not ours to reformat, so keep markdownlint out of it.
+  "ignores": ["**/.venv/**"]
+}

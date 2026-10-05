@@ -17,6 +17,7 @@
     "db:reset": "prisma migrate reset --force",
     "supply:import": "tsx prisma/supply-import.ts",
     "supply:probe": "tsx prisma/live-rate-probe.ts",
+    "supply:contract": "tsx prisma/live-contract-check.ts",
     "db:indexes": "tsx prisma/apply-indexes.ts"
   },
   "prisma": {

@@ -1,5 +1,5 @@
 {
-    "typescript.tsdk": "node_modules/typescript/lib",
+    "js/ts.tsdk.path": "node_modules/typescript/lib",
     "editor.experimental.preferTreeSitter.css": true,
     "editor.experimental.preferTreeSitter.typescript": true,
     "editor.experimental.treeSitterTelemetry": true,
@@ -19,5 +19,30 @@
     "dictation.model": "nemotron-3.5-asr-streaming-0.6b",
     "dictation.showTranscript": false,
     "dictation.experimental.llmCleanup": false,
-    "js/ts.experimental.useTsgo": false
+    "js/ts.experimental.useTsgo": false,
+    "markdown.validate.enabled": true,
+    "chat.mcp.serverSampling": {
+        "expedia-style-travel-platform/.mcp.json: microsoft/markitdown": {
+            "allowedModels": [
+                "copilotcli/auto",
+                "copilot/auto",
+                "openrouter/OpenRouter/apodex/apodex-1.1-mini:free",
+                "openrouter/OpenRouter/cohere/north-mini-code:free",
+                "openrouter/OpenRouter/dots-studio/dots-3-note-preview:free",
+                "openrouter/OpenRouter/google/gemma-4-26b-a4b-it:free",
+                "openrouter/OpenRouter/google/gemma-4-31b-it:free",
+                "openrouter/OpenRouter/inclusionai/ling-3.0-flash-sante:free",
+                "openrouter/OpenRouter/liquid/lfm-2.5-2.6b:free",
+                "openrouter/OpenRouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+                "openrouter/OpenRouter/nvidia/nemotron-3-super-120b-a12b:free",
+                "openrouter/OpenRouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+                "openrouter/OpenRouter/nvidia/nemotron-3.5-lightning:free",
+                "openrouter/OpenRouter/poolside/laguna-s-2.1:free",
+                "openrouter/OpenRouter/poolside/laguna-xs-2.1:free",
+                "openrouter/OpenRouter/qwen/qwen3.8-27b:free",
+                "openrouter/OpenRouter/thinkingmachines/inkling:free",
+                "openrouter/OpenRouter/thinkingmachines/inkling-small:free"
+            ]
+        }
+    }
 }

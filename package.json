@@ -23,11 +23,12 @@
     "setup": "pnpm install && pnpm db:generate && pnpm db:push && pnpm db:indexes && pnpm db:seed",
     "supply:import": "pnpm --filter @easytrip/api supply:import",
     "supply:probe": "pnpm --filter @easytrip/api supply:probe",
+    "supply:contract": "pnpm --filter @easytrip/api supply:contract",
     "smoke": "bash scripts/smoke-test.sh",
     "audit:schema": "bash scripts/schema-audit.sh",
     "test:realtime": "node scripts/realtime-test.mjs",
     "check:mobile": "bash scripts/mobile-check.sh",
-    "verify": "pnpm typecheck && pnpm audit:schema && pnpm smoke && pnpm test:realtime && pnpm check:mobile",
+    "verify": "pnpm typecheck && pnpm audit:schema && pnpm supply:contract && pnpm smoke && pnpm test:realtime && pnpm check:mobile",
     "db:indexes": "pnpm --filter @easytrip/api db:indexes"
   },
   "devDependencies": {
