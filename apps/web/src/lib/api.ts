@@ -246,6 +246,12 @@ export type ProductDetail = {
   selectedDate: string;
   quantity: number;
   ticketTypes: TicketType[];
+  /**
+   * Live context for the product, when the API can supply it. Absent for every
+   * non-flight category and for a flight with nothing nearby — a flight the
+   * upstream has no coverage for is a normal state, not an error.
+   */
+  live?: LiveContent | null;
   reviews: {
     id: string;
     rating: number;
@@ -269,6 +275,46 @@ export type ProductDetail = {
     ratingCount: number;
     badge: string | null;
   }[];
+};
+
+/**
+ * Live air traffic near a flight product, as returned by the API's
+ * `live` block. Mirrors `apps/api/src/modules/supply/live-content.ts`.
+ *
+ * `advisory` is always `true` and is deliberately part of the type: it is
+ * ambient context about the airspace around a destination, never a claim that
+ * any of these aircraft is the traveller's booked flight. The catalogue's
+ * flight numbers are synthetic and cannot be matched to real airframes, so a
+ * UI that presented this as "your flight" would be asserting something false
+ * inside the booking funnel.
+ *
+ * The API only returns airborne traffic — `onGround` is always `false` and
+ * `altitudeFt`/`groundSpeedKt` are populated. Parked aircraft are filtered out
+ * server-side, because between roughly 22:00 and 06:00 UTC they are the only
+ * traffic near a European airport and reporting them would fill this panel with
+ * rows that say nothing. `summary` is therefore always a non-null string when
+ * `live` is present.
+ */
+export type LiveContent = {
+  flights: {
+    icao24: string;
+    callsign: string;
+    registration: string | null;
+    aircraftType: string | null;
+    latitude: number;
+    longitude: number;
+    altitudeFt: number | null;
+    onGround: boolean;
+    groundSpeedKt: number | null;
+    headingDeg: number | null;
+    squawk: string | null;
+    positionTime: number;
+    source: string;
+  }[];
+  summary: string | null;
+  advisory: true;
+  fetchedAt: number;
+  fromCache: boolean;
 };
 
 export type AvailabilityDay = {

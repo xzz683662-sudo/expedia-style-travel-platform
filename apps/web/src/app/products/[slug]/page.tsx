@@ -174,6 +174,31 @@ export default async function ProductPage({ params, searchParams }: PageProps) {
             </section>
           )}
 
+          {/* Live air traffic. Ambient context only — see `LiveContent.advisory`. */}
+          {product.live?.summary && (
+            <section className="card card-pad" data-live-content={product.slug}>
+              <div className="row-between wrap" style={{ gap: 'var(--sp-3)', marginBottom: 'var(--sp-3)' }}>
+                <h2 style={{ fontSize: 18 }}>{t('product.liveTraffic')}</h2>
+                <span className="badge badge-neutral tiny">{t('product.liveAdvisory')}</span>
+              </div>
+              <p className="muted" style={{ marginTop: 0 }}>
+                {product.live.summary}
+              </p>
+              <ul
+                className="row wrap tiny muted"
+                style={{ gap: 'var(--sp-3)', listStyle: 'none', margin: 'var(--sp-3) 0 0', padding: 0 }}
+              >
+                {product.live.flights.slice(0, 4).map((flight) => (
+                  <li key={flight.icao24}>
+                    <span className="bold">{flight.callsign}</span>
+                    {flight.aircraftType ? ` · ${flight.aircraftType}` : ''}
+                    {flight.altitudeFt !== null ? ` · ${Math.round(flight.altitudeFt / 100) * 100} ft` : ''}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+
           {/* Calendar */}
           <section className="card card-pad stack">
             <div className="row-between">
