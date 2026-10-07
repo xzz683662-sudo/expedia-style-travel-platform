@@ -33,6 +33,8 @@ export function CheckoutFlow({ slug, locale }: { slug: string; locale: LocaleCod
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** Set when the API refuses the order because the account is unverified. */
+  const [needsVerification, setNeedsVerification] = useState(false);
 
   // Guest + payment state
   const [email, setEmail] = useState('');
@@ -92,6 +94,11 @@ export function CheckoutFlow({ slug, locale }: { slug: string; locale: LocaleCod
         setError(t('checkout.priceChanged'));
       } else if (caught instanceof ApiError && caught.code === 'INVENTORY_UNAVAILABLE') {
         setError(t('checkout.soldOut'));
+      } else if (caught instanceof ApiError && caught.code === 'EMAIL_NOT_VERIFIED') {
+        // A precondition on the account, not the cart, so route the shopper to
+        // the place that fixes it instead of telling them to try again.
+        setNeedsVerification(true);
+        setError(t('checkout.emailNotVerified'));
       } else {
         setError(caught instanceof ApiError ? caught.message : t('checkout.couldNotStartBooking'));
       }
@@ -243,6 +250,11 @@ export function CheckoutFlow({ slug, locale }: { slug: string; locale: LocaleCod
                 <span aria-hidden>⚠</span>
                 <span className="small">{error}</span>
               </div>
+              {needsVerification && (
+                <Link href="/verify-email" className="btn btn-primary btn-sm" style={{ marginTop: 'var(--sp-3)' }}>
+                  {t('auth.emailNotVerifiedCta')}
+                </Link>
+              )}
             </div>
           )}
 

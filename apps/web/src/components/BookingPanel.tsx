@@ -98,6 +98,12 @@ export function BookingPanel({
   async function checkout() {
     setSubmitting(true);
     const params = new URLSearchParams({
+      // `slug` is required, not decorative: `/checkout` reads it to identify the
+      // product and redirects to `/search` when it is absent. It was missing
+      // here, so the primary "Reserve & continue to payment" button silently
+      // discarded the shopper's date, ticket type and quantity and dropped them
+      // back on search.
+      slug: product.slug,
       ticketTypeId: selected.id,
       date: selectedDate,
       quantity: String(quantity),

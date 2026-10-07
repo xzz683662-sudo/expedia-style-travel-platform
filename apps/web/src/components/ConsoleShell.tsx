@@ -32,6 +32,9 @@ const ADMIN_NAV: Surface[] = [
 ];
 
 const SUPPORT_NAV: Surface[] = [
+  // Live chat first: it is the one support surface with a customer waiting on
+  // the other end, so it should be the page an agent lands on.
+  { href: '/support/inbox', labelKey: 'support.inbox' },
   { href: '/support', labelKey: 'support.customers' },
   { href: '/support/orders', labelKey: 'support.orders' },
   { href: '/support/coupons', labelKey: 'support.coupons' },
@@ -41,8 +44,6 @@ const SUPPORT_NAV: Surface[] = [
 const ROLE_ACCESS: Record<string, { surface: 'admin' | 'support'; nav: Surface[] }> = {
   ADMIN: { surface: 'admin', nav: ADMIN_NAV },
   SUPPORT: { surface: 'support', nav: SUPPORT_NAV },
-  OPERATOR: { surface: 'admin', nav: [ADMIN_NAV[2]] },
-  MERCHANT: { surface: 'admin', nav: ADMIN_NAV },
 };
 
 export function ConsoleShell({

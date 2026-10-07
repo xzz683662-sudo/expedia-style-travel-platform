@@ -4,6 +4,7 @@ import { Footer } from '@/components/Footer';
 import { Header } from '@/components/Header';
 import { LocaleSwitcher } from '@/components/LocaleSwitcher';
 import { RealtimeProvider } from '@/components/RealtimeProvider';
+import { SupportWidget } from '@/components/SupportWidget';
 import { resolveServerLocale } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 import { brandName, brandTagline } from '@/lib/brand';
@@ -101,6 +102,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           <Header locale={locale} />
           <main id="main">{children}</main>
           <Footer locale={locale} />
+          {/* The shopper's end of the support chat. It hides itself inside the
+              staff consoles, so mounting it once here is safe. */}
+          <SupportWidget locale={locale} />
         </RealtimeProvider>
       </body>
     </html>

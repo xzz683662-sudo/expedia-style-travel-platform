@@ -18,6 +18,10 @@
     "db:migrate": "pnpm --filter @easytrip/api db:migrate",
     "db:seed": "pnpm --filter @easytrip/api db:seed",
     "db:reset": "pnpm --filter @easytrip/api db:reset",
+    "migrate:roles": "pnpm --filter @easytrip/api migrate:roles",
+    "auth:contract": "pnpm --filter @easytrip/api auth:contract",
+    "auth:integration": "pnpm --filter @easytrip/api auth:integration",
+    "support-chat:contract": "pnpm --filter @easytrip/api support-chat:contract",
     "infra:up": "docker compose up -d",
     "infra:down": "docker compose down",
     "setup": "pnpm install && pnpm db:generate && pnpm db:push && pnpm db:indexes && pnpm db:seed",
@@ -32,7 +36,10 @@
     "test:realtime": "node scripts/realtime-test.mjs",
     "test:feed": "node scripts/feed-test.mjs",
     "check:mobile": "bash scripts/mobile-check.sh",
-    "verify": "pnpm typecheck && pnpm audit:schema && pnpm supply:contract && pnpm inventory:contract && pnpm credentials:contract && pnpm smoke && pnpm test:realtime && pnpm check:mobile",
+    "ux:audit:app": "playwright test scripts/ux-audit/app.spec.ts",
+    "ux:audit:reference": "playwright test scripts/ux-audit/reference.spec.ts",
+    "e2e:web": "playwright test scripts/ux-audit/app.spec.ts --project=desktop --grep \"end-to-end\" --grep-invert \"render audit\"",
+    "verify": "pnpm typecheck && pnpm audit:schema && pnpm supply:contract && pnpm inventory:contract && pnpm auth:contract && pnpm support-chat:contract && pnpm credentials:contract && pnpm smoke && pnpm test:realtime && pnpm check:mobile",
     "db:indexes": "pnpm --filter @easytrip/api db:indexes"
   },
   "devDependencies": {

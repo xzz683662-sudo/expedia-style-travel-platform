@@ -266,6 +266,31 @@ check "POST /auth/register returns a token" "$([ -n "$TOKEN" ] && [ "$TOKEN" != 
 ME=$(curl -fsS "$API/api/v1/auth/me" -H "Authorization: Bearer $TOKEN")
 check "GET /auth/me returns the profile" "$(echo "$ME" | jget '.email' | grep -q "$EMAIL" && echo true || echo false)"
 
+# --- Email verification -----------------------------------------------------
+# Registration no longer signs the shopper all the way in: checkout is gated on
+# a confirmed address, and the code is echoed in the response because the API
+# runs with the console mail transport outside production.
+DEV_CODE=$(echo "$REG" | jget '.emailVerification.devCode')
+check "registration issues a 6-digit verification code" "$(echo "$DEV_CODE" | grep -Eq '^[0-9]{6}$' && echo true || echo false)"
+
+# The gate runs before the cart is even read, so a placeholder line is enough.
+GATE_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/orders" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"lines":[{"ticketTypeId":"unverified-gate","serviceDate":"2026-12-01","quantity":1}],"contactEmail":"gate@easytrip.test"}')
+check "an unverified account cannot create an order (403)" "$([ "$GATE_CODE" = "403" ] && echo true || echo false)"
+
+VERIFIED_WRONG=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/auth/verify-email" \
+  -H 'Content-Type: application/json' -d "{\"email\":\"$EMAIL\",\"code\":\"000000\"}")
+check "a wrong verification code is refused (422)" "$([ "$VERIFIED_WRONG" = "422" ] && echo true || echo false)"
+
+VERIFY=$(curl -fsS -X POST "$API/api/v1/auth/verify-email" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"code\":\"$DEV_CODE\"}")
+check "POST /auth/verify-email confirms the address" "$(echo "$VERIFY" | jget '.verified' | grep -q true && echo true || echo false)"
+
+ME2=$(curl -fsS "$API/api/v1/auth/me" -H "Authorization: Bearer $TOKEN")
+check "the account now reads as verified" "$(echo "$ME2" | jget '.emailVerified' | grep -q true && echo true || echo false)"
+
 LOGIN=$(curl -fsS -X POST "$API/api/v1/auth/login" \
   -H 'Content-Type: application/json' \
   -d "{\"email\":\"$EMAIL\",\"password\":\"Password123!\"}")
@@ -628,9 +653,11 @@ check "a declined card returns FAILED" "$(echo "$DECLINE_PAY" | jget '.status' |
 head2 "Gate redemption"
 STAFF=$(curl -fsS -X POST "$API/api/v1/auth/login" \
   -H 'Content-Type: application/json' \
-  -d '{"email":"operator@easytrip.test","password":"Password123!"}')
+  -d '{"email":"admin@easytrip.test","password":"Password123!"}')
 STAFF_TOKEN=$(echo "$STAFF" | jget '.token')
-check "operator can log in" "$([ -n "$STAFF_TOKEN" ] && [ "$STAFF_TOKEN" != "null" ] && echo true || echo false)"
+# The two-surface model folded the gate operator into ADMIN; this login asserts
+# the merged role can still scan, which is the capability that moved.
+check "staff can log in" "$([ -n "$STAFF_TOKEN" ] && [ "$STAFF_TOKEN" != "null" ] && echo true || echo false)"
 
 SCAN=$(curl -fsS -X POST "$API/api/v1/scan/verify" \
   -H 'Content-Type: application/json' \
@@ -683,6 +710,29 @@ check "POST /notifications/:id/read marks it read" "$(echo "$READ" | jget '.ok' 
 
 ANON_NOTIFS=$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/notifications")
 check "notifications reject anonymous access (401)" "$([ "$ANON_NOTIFS" = "401" ] && echo true || echo false)"
+
+head2 "Support chat"
+CHAT=$(curl -fsS -X POST "$API/api/v1/support/conversations" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"subject":"Smoke test question","message":"Hello from the smoke test."}')
+CHAT_ID=$(echo "$CHAT" | jget '.id')
+check "a shopper can open a support conversation" "$([ -n "$CHAT_ID" ] && [ "$CHAT_ID" != "null" ] && echo true || echo false)"
+
+MY_CHATS=$(curl -fsS "$API/api/v1/support/conversations/mine" -H "Authorization: Bearer $TOKEN")
+check "the shopper lists their own conversation" "$(echo "$MY_CHATS" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).items.some(i=>i.id==='$CHAT_ID'))}catch{console.log(false)}});" | grep -q true && echo true || echo false)"
+
+CHAT_REPLY=$(curl -fsS -X POST "$API/api/v1/support/conversations/$CHAT_ID/messages" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $TOKEN" \
+  -d '{"body":"Adding a second message."}')
+check "the shopper can post a follow-up message" "$(echo "$CHAT_REPLY" | jget '.authorType' | grep -q 'CUSTOMER' && echo true || echo false)"
+
+ANON_CHAT=$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/support/conversations/mine")
+check "chat rejects anonymous access (401)" "$([ "$ANON_CHAT" = "401" ] && echo true || echo false)"
+
+# The shopper's token must not reach the staff queue — this is the authorization
+# boundary the feature exists behind.
+CUSTOMER_ON_INBOX=$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/support/inbox" -H "Authorization: Bearer $TOKEN")
+check "a customer cannot reach the staff inbox (403)" "$([ "$CUSTOMER_ON_INBOX" = "403" ] && echo true || echo false)"
 
 head2 "Admin"
 ADMIN=$(curl -fsS -X POST "$API/api/v1/auth/login" \

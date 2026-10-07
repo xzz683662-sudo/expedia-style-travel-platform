@@ -313,9 +313,17 @@ p:last-child { margin-bottom: 0; }
 }
 
 @media (max-width: 860px) {
-  /* The rail moves below the main content. */
+  /* The rail moves below the main content.
+     `align-items: stretch` is load-bearing, not cosmetic. The base rule uses
+     `flex-start` so the two columns align at the top in row mode; once the
+     direction flips to `column`, the same value stops the children filling the
+     width, so each one is sized to its *max-content* instead. A rail item
+     containing a 7-column calendar or a horizontal product card then computes
+     ~540px wide on a 393px phone, and because `body` hides horizontal overflow
+     the excess is silently clipped rather than scrollable. */
   .with-rail {
     flex-direction: column;
+    align-items: stretch;
     gap: var(--sp-4);
   }
   .with-rail-side,
@@ -2197,3 +2205,220 @@ a.promo-card:hover {
   }
   .toast { width: 100%; }
 }
+
+/* ==========================================================================
+   Email-verification banner
+   --------------------------------------------------------------------------
+   Shown to a signed-in shopper whose address is still unconfirmed, who is one
+   step from being refused at checkout.
+   ========================================================================== */
+
+.verify-banner {
+  background: var(--warning-50);
+  border-bottom: 1px solid var(--warning-600);
+  color: var(--warning-600);
+}
+
+.verify-banner-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding-top: var(--sp-2);
+  padding-bottom: var(--sp-2);
+}
+
+@media (max-width: 640px) {
+  .verify-banner-inner {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--sp-2);
+  }
+}
+
+/* ==========================================================================
+   Support chat
+   --------------------------------------------------------------------------
+   One bubble on the storefront, one queue in the console, over the same
+   conversation records.
+   ========================================================================== */
+
+.support-widget {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-3);
+}
+
+/* Staff consoles have their own reply surface; a shopper bubble there is noise. */
+body:has(.console-root) .support-widget { display: none; }
+
+.chat-bubble {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  border: 0;
+  background: var(--brand-600);
+  color: #fff;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  display: grid;
+  place-items: center;
+}
+
+.chat-bubble:hover { background: var(--brand-700); }
+
+.chat-bubble-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  background: var(--critical-600);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+.chat-panel {
+  width: min(360px, calc(100vw - var(--sp-6)));
+  height: min(520px, calc(100vh - 140px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+.chat-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.chat-signin { padding: var(--sp-4); }
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  background: var(--bg-muted);
+}
+
+.chat-empty { margin: auto; max-width: 240px; }
+
+.chat-msg {
+  max-width: 82%;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: #fff;
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-msg.mine {
+  align-self: flex-end;
+  background: var(--brand-100);
+  border-color: var(--brand-100);
+}
+
+.chat-msg.theirs { align-self: flex-start; }
+
+.chat-msg.system {
+  align-self: center;
+  background: transparent;
+  border: 0;
+}
+
+.chat-composer {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.chat-composer .input { flex: 1; }
+
+/* --- Staff inbox --- */
+
+.inbox {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) 1fr;
+  gap: var(--sp-4);
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .inbox { grid-template-columns: 1fr; }
+}
+
+.inbox-queue { overflow: hidden; }
+
+.inbox-filters {
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.inbox-item {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  padding: var(--sp-3);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font: inherit;
+  color: inherit;
+}
+
+.inbox-item:hover { background: var(--bg-muted); }
+.inbox-item.active { background: var(--brand-100); }
+
+.inbox-thread {
+  min-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.inbox-thread-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.inbox-thread .chat-messages { flex: 1; }

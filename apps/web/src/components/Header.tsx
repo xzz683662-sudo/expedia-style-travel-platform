@@ -41,8 +41,6 @@ const STAFF_ROUTES: Record<string, { href: string; key: string }[]> = {
     { href: '/support', key: 'nav.supportConsole' },
   ],
   SUPPORT: [{ href: '/support', key: 'nav.supportConsole' }],
-  OPERATOR: [{ href: '/admin/scan', key: 'nav.operatorConsole' }],
-  MERCHANT: [{ href: '/admin', key: 'nav.operatorConsole' }],
 };
 
 export function Header({ locale }: { locale: LocaleCode }) {
@@ -52,6 +50,7 @@ export function Header({ locale }: { locale: LocaleCode }) {
   const [token, setToken] = useState<string | null>(null);
   const [name, setName] = useState<string | null>(null);
   const [role, setRole] = useState<string | null>(null);
+  const [emailVerified, setEmailVerified] = useState<boolean | null>(null);
   const [open, setOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
 
@@ -90,6 +89,7 @@ export function Header({ locale }: { locale: LocaleCode }) {
       .then((profile) => {
         setName(profile.firstName);
         setRole(profile.role);
+        setEmailVerified(profile.emailVerified);
       })
       .catch(() => undefined);
   }, []);
@@ -99,6 +99,7 @@ export function Header({ locale }: { locale: LocaleCode }) {
     setToken(null);
     setName(null);
     setRole(null);
+    setEmailVerified(null);
     setOpen(false);
     setMenuOpen(false);
     window.location.href = '/';
@@ -236,6 +237,22 @@ export function Header({ locale }: { locale: LocaleCode }) {
           )}
         </div>
       </div>
+
+      {/* A signed-in but unverified shopper is one step from being unable to
+          check out. Surfacing that here — rather than only when the order is
+          rejected — turns a dead end at payment into a one-click fix. */}
+      {token && emailVerified === false && (
+        <div className="verify-banner" data-testid="verify-banner">
+          <div className="container verify-banner-inner">
+            <span className="small">
+              <strong>{t('auth.emailNotVerified')}</strong> — {t('auth.emailNotVerifiedBody')}
+            </span>
+            <Link href="/verify-email" className="btn btn-primary btn-sm">
+              {t('auth.emailNotVerifiedCta')}
+            </Link>
+          </div>
+        </div>
+      )}
 
       {/* Mobile drawer. Rendered unconditionally and toggled by class so the
           open/close transition isn't gated on a React state flip mid-animation. */}

@@ -214,7 +214,7 @@ export function RegisterForm({ locale }: { locale: LocaleCode }) {
           </p>
         </div>
 
-        {devCode && <p className="small badge badge-info" data-testid="dev-code">{t('auth.devCodeHint', devCode)}</p>}
+        {devCode && <p className="small badge badge-brand" data-testid="dev-code">{t('auth.devCodeHint', devCode)}</p>}
 
         <label className="field">
           <span className="label">{t('auth.verifyCode')}</span>
@@ -233,7 +233,7 @@ export function RegisterForm({ locale }: { locale: LocaleCode }) {
         </label>
 
         {error && <p className="form-error">{error}</p>}
-        {notice && <p className="small good-text">{notice}</p>}
+        {notice && <p className="small badge badge-positive">{notice}</p>}
 
         <button className="btn btn-primary btn-block" disabled={busy || code.length !== 6} data-testid="verify-submit">
           {busy ? t('auth.verifying') : t('auth.verifyAction')}

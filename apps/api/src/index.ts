@@ -68,8 +68,8 @@ export async function buildServer(): Promise<FastifyInstance> {
   });
 
   await app.register(rateLimit, {
-    max: 300,
-    timeWindow: '1 minute',
+    max: config.rateLimit.max,
+    timeWindow: `${config.rateLimit.windowSeconds} seconds`,
     keyGenerator: (request) => request.ip,
     // Webhooks and order creation are exempt: they are either server-to-server
     // or already protected by idempotency keys + inventory holds.

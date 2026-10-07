@@ -112,6 +112,17 @@ const run = async () => {
   const token = registration.token;
   check('registration returns a token', Boolean(token));
 
+  // Checkout is gated on a confirmed address, so this account has to complete
+  // the same verification a shopper would. The API runs the console mail
+  // transport outside production, so the code comes back in the response.
+  const devCode = registration.emailVerification?.devCode;
+  check('registration issues a verification code', /^\d{6}$/.test(String(devCode)));
+  const verification = await api('/api/v1/auth/verify-email', {
+    method: 'POST',
+    body: { email, code: devCode },
+  });
+  check('the address verifies', verification.verified === true);
+
   const me = await api('/api/v1/auth/me', { token });
   const client = connect(token);
   const hello = await client.ready;

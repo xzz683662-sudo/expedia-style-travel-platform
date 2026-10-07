@@ -310,6 +310,20 @@ export const config = {
   },
 
   /**
+   * Global per-IP request ceiling.
+   *
+   * Configurable because the default is tuned for a human shopper, and a
+   * browser-driven test is not one: a single page load fires a dozen API calls
+   * plus Next's prefetches, so an automated pass over the storefront exhausts a
+   * 300/min budget in seconds and then watches unrelated requests fail with 429
+   * — which looks like a product bug and is not.
+   */
+  rateLimit: {
+    max: int('RATE_LIMIT_MAX', 300),
+    windowSeconds: int('RATE_LIMIT_WINDOW_SECONDS', 60),
+  },
+
+  /**
    * Outbound email — currently only the address-verification code.
    *
    * Zero-key by default. `console` writes the message to the API log, which is

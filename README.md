@@ -165,12 +165,16 @@ All use the password **`Password123!`**.
 | Email | Role | What they can see |
 | --- | --- | --- |
 | `traveler@easytrip.test` | Customer | Bookings, e-tickets, points, reviews |
-| `admin@easytrip.test` | Admin | Dashboard, ledger, coupons, audit, staff tools |
-| `operator@easytrip.test` | Operator | Gate scanner at `/admin/scan` |
-| `merchant@easytrip.test` | Merchant | Own products and payouts |
-| `support@easytrip.test` | Support | Customer lookup, wallet adjustments, goodwill refunds, coupon verification |
+| `admin@easytrip.test` | Admin | Everything: dashboard, ledger, coupons, audit, catalogue, gate scanner at `/admin/scan` |
+| `support@easytrip.test` | Support | Live chat inbox, customer lookup, wallet adjustments, goodwill refunds, coupon verification |
 
-The login page has one-click fill buttons for the customer and staff accounts.
+The login page has one-click fill buttons for these accounts.
+
+> **There are exactly two staff roles, and two staff consoles.** `OPERATOR` (gate
+> scanning) and `MERCHANT` (a partner's products) were folded into `ADMIN`: gate scanning
+> is an operations capability, and a partner merchant is a *data model* (`Merchant` still
+> owns inventory and settles commissions) rather than a permission. See
+> [`docs/adr/0002-two-staff-surfaces.md`](./docs/adr/0002-two-staff-surfaces.md).
 
 > **Support sits *below* admin on purpose.** The cheapest way to stop an agent from
 > breaking pricing is to never let them reach it: `SUPPORT` cannot touch the catalogue,
@@ -293,8 +297,8 @@ The platform ships as three visually and logically distinct surfaces:
 | Surface | Route | Who | Cannot see |
 | --- | --- | --- | --- |
 | **Storefront** | `/`, `/search`, `/products/*`, `/cart`, `/checkout`, `/orders`, `/tickets`, `/wishlist`, `/itineraries`, `/loyalty` | Customers | Anything staff-related |
-| **Operations** | `/admin`, `/admin/finance`, `/admin/scan`, `/admin/promo` | Admin, Operator, Merchant | — |
-| **Support** | `/support`, `/support/orders`, `/support/coupons`, `/support/audit` | Support, Admin | Catalogue, pricing rules, inventory, staff accounts |
+| **Operations** | `/admin`, `/admin/finance`, `/admin/scan`, `/admin/promo` | Admin | — |
+| **Support** | `/support/inbox`, `/support`, `/support/orders`, `/support/coupons`, `/support/audit` | Support, Admin | Catalogue, pricing rules, inventory, staff accounts |
 
 Each console gets its own colour identity (admin = brand blue, support = teal) so an
 operator working across a handover can tell at a glance which surface they are in — the
@@ -450,16 +454,39 @@ Operations: `GET /health`, `GET /ready` (per-dependency readiness).
 ## Testing
 
 ```bash
-bash scripts/smoke-test.sh    # 90 checks, requires both services running
-bash scripts/mobile-check.sh  # 40 checks, responsive layer regression guard
+bash scripts/smoke-test.sh    # 102 checks, requires both services running
+bash scripts/mobile-check.sh  # 41 checks, responsive layer regression guard
 bash scripts/schema-audit.sh  # finds columns a seed writes but no route reads
 pnpm typecheck                # strict TS across api + web
 pnpm --filter @easytrip/web build
-pnpm verify                   # typecheck + schema audit + smoke + realtime + mobile
+pnpm verify                   # typecheck + schema audit + contracts + smoke + realtime + mobile
 ```
 
-The smoke suite is end-to-end against a live stack — it books a real order, pays it,
-redeems the ticket at the gate, and asserts the second scan is rejected.
+The smoke suite is end-to-end against a live stack — it registers, verifies the emailed
+code, books a real order, pays it, redeems the ticket at the gate, and asserts the second
+scan is rejected. It also asserts that an **unverified** account is refused at checkout
+and that a customer token cannot reach the staff support inbox.
+
+`pnpm verify` runs an offline contract gate per subsystem before the live suites:
+`supply:contract`, `inventory:contract`, `auth:contract` (a verification code is never
+stored in the clear; one failure message; checkout gating) and `support-chat:contract`
+(customer reads are always scoped by the token's user).
+
+### Browser audit and end-to-end chain
+
+```bash
+pnpm ux:audit:app        # renders the storefront at 1440x900 and 393x844, fails on defects
+pnpm e2e:web             # register → verify → search → reserve → pay → ticket
+pnpm ux:audit:reference  # the same audit against expedia.com (reports, never gates)
+```
+
+These are **not part of `pnpm verify`**: `verify` must stay deterministic and offline,
+while this suite needs a running API and web server (and, for the reference spec, the
+public internet). It checks for broken images, horizontal overflow, collapsed content and
+unnamed controls, and distinguishes a same-origin asset that failed (a defect) from a
+blocked third-party CDN (environmental). See
+[`scripts/ux-audit/README.md`](./scripts/ux-audit/README.md) — it also lists the two real
+defects this suite has already caught.
 
 `schema-audit.sh` mechanises a failure mode this codebase kept hitting: a seed
 or backfill writes a column, and no route ever reads it, so it reads like a
