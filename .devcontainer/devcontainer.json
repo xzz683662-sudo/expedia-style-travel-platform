@@ -3,7 +3,8 @@
 	"customizations": {
 		"vscode": {
 			"extensions": [
-				"mtxr.sqltools"
+				"mtxr.sqltools",
+				"ms-python.vscode-pylance"
 			]
 		}
 	}

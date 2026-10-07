@@ -5,10 +5,28 @@
 			"command": "uvx",
 			"args": [
 				"markitdown-mcp@0.0.1a4"
+			]
+		},
+		"microsoft/playwright-mcp": {
+			"type": "stdio",
+			"command": "npx",
+			"args": [
+				"@playwright/mcp@latest"
 			],
 			"gallery": "https://api.mcp.github.com",
-			"version": "1.0.0"
+			"version": "0.0.1-seed"
+		},
+		"apify": {
+			"type": "http",
+			"url": "https://mcp.apify.com/"
 		}
 	},
-	"inputs": []
+	"inputs": [
+		{
+			"id": "CONTEXT7_API_KEY",
+			"type": "promptString",
+			"description": "API key for authentication",
+			"password": true
+		}
+	]
 }

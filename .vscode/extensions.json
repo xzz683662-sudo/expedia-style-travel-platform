@@ -2,7 +2,9 @@
     "recommendations": [
         "leizongmin.node-module-intellisense",
         "ms-vscode.azure-repos",
-        "donjayamanne.githistory"
+        "donjayamanne.githistory",
+        "ms-python.vscode-pylance",
+        "mtxr.sqltools"
     ],
     // This repo's only `.sql` is PostgreSQL (Prisma native types). The MSSQL
     // extension lints it with a T-SQL parser and flags valid PG syntax, so it is

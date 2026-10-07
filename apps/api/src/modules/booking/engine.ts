@@ -2,7 +2,7 @@ import { OrderStatus, PaymentChannel, PaymentStatus, TicketStatus, type PriceRul
 import { config } from '../../config/env';
 import { logger } from '../../lib/logger';
 import { prisma } from '../../lib/prisma';
-import { differenceInDays, hoursBetween, toServiceDate } from '../../utils/date';
+import { differenceInDays, formatServiceDate, hoursBetween, toServiceDate } from '../../utils/date';
 import { AppError, assertFound } from '../../utils/errors';
 import { generateBarcode, generateOrderNumber, generateTicketNumber } from '../../utils/ids';
 import { allocate, applyBps, sumCents } from '../../utils/money';
@@ -11,6 +11,9 @@ import { consumeHold, placeHold, placeStayHold, releaseHold, returnSoldUnits } f
 import { getGatewayForChannel, getPaymentGateway, isOfflineMethod } from '../payments/gateway';
 import { createInAppNotification, emitOrderCreated, emitOrderEvent, emitPaymentEvent } from '../realtime/notify';
 import { generateTicketArtifacts } from '../ticketing/issuer';
+import { LIVE_CATEGORY_BY_PRODUCT_TYPE, type LiveQuote } from '../supply/live';
+import { liveRates } from '../supply/live-adapters';
+import { evaluateCheckoutLive } from '../supply/live-checkout';
 
 /**
  * ---------------------------------------------------------------------------
@@ -196,8 +199,83 @@ export async function createPendingOrder(input: CheckoutInput): Promise<Checkout
       }
     }
 
+    // --- Live re-validation, at checkout freshness -------------------------
+    // The product page and search may have quoted a live-derived price. Checkout
+    // is where that number becomes money, so it is re-proved here rather than
+    // read back from a cache the shopper's browser filled minutes ago.
+    //
+    // `checkout` freshness carries TTL 0 by design (`supply/live.ts`), so this
+    // bypasses every live-layer cache and asks the source again. A pre-warmed
+    // source (trvl) answers from its own store — which is exactly the value the
+    // shopper saw — while an inline source is genuinely re-fetched.
+    //
+    // Failure is absorbed: a live layer that throws must never block a sale the
+    // platform can otherwise honour. The catalogue price stands, as on the read
+    // paths. With the layer switched off this whole block is inert and checkout
+    // is bit-for-bit what it was before.
+    let liveQuote: LiveQuote | null = null;
+    const liveCategory = LIVE_CATEGORY_BY_PRODUCT_TYPE[ticketType.product.type];
+    if (liveRates.enabled && liveCategory) {
+      const resolved = await liveRates
+        .resolve(
+          {
+            slug: ticketType.product.slug,
+            category: liveCategory,
+            serviceDate: formatServiceDate(serviceDate),
+            // A stay is priced and held per night, so the live query carries the
+            // range too; a single-date line leaves it null as everywhere else.
+            checkOutDate: isStay ? formatServiceDate(checkOut) : null,
+            quantity: line.quantity,
+            currency: ticketType.currency,
+          },
+          'checkout',
+        )
+        .catch((error: unknown) => {
+          logger.warn('live.checkout_resolve_failed', {
+            slug: ticketType.product.slug,
+            reason: (error as Error).message,
+          });
+          return null;
+        });
+      liveQuote = resolved?.quote ?? null;
+    }
+
+    const verdict = evaluateCheckoutLive({
+      quote: liveQuote,
+      quantity: line.quantity,
+      catalogBasePriceCents: ticketType.basePriceCents,
+      toleranceBps: config.supply.live.checkoutToleranceBps,
+    });
+
+    // Both rejections happen before any hold is placed, so a refused line leaves
+    // no capacity claimed behind it.
+    if (verdict.kind === 'sold_out') {
+      throw AppError.inventoryUnavailable('This option is no longer available', {
+        available: verdict.available,
+        requested: verdict.requested,
+      });
+    }
+    if (verdict.kind === 'price_changed') {
+      throw AppError.priceChanged('The price for this option has changed', {
+        previousUnitPriceCents: verdict.previousUnitPriceCents,
+        currentUnitPriceCents: verdict.currentUnitPriceCents,
+        currency: verdict.currency,
+      });
+    }
+
+    if (liveQuote) {
+      logger.info('live.rate_resolved', {
+        slug: ticketType.product.slug,
+        sourceId: liveQuote.sourceId,
+        net: liveQuote.netPriceCents,
+        sellable: liveQuote.sellable,
+        freshness: 'checkout',
+        fromCache: liveQuote.fromCache,
+      });
+    }
+
     const quote = computeQuote({
-      basePriceCents: ticketType.basePriceCents,
+      basePriceCents: verdict.basePriceCents,
       compareAtPriceCents: ticketType.compareAtCents,
       taxBps: ticketType.taxBps,
       feeBps: ticketType.feeBps,

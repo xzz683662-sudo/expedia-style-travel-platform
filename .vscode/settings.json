@@ -23,12 +23,12 @@
     "markdown.validate.enabled": true,
     "chat.mcp.serverSampling": {
         "expedia-style-travel-platform/.mcp.json: microsoft/markitdown": {
-            "allowedModels": [
-    
-            ]
+            "allowedModels": []
         },
         "expedia-style-travel-platform/.vscode/mcp.json: microsoft/markitdown": {
-            "allowedModels": []
+            "allowedModels": [
+                "bai/gpt-image-2"
+            ]
         }
     },
     "prisma.pinToPrisma6": true,

@@ -84,11 +84,17 @@ export function CheckoutFlow({ slug, locale }: { slug: string; locale: LocaleCod
       setTotalCents(result.totalCents);
       return result.orderId;
     } catch (caught) {
-      const message =
-        caught instanceof ApiError
-          ? caught.message
-          : t('checkout.couldNotStartBooking');
-      setError(message);
+      // Checkout revalidates the live rate server-side, so two failures are
+      // actionable in a way the generic message is not: the price moved, or the
+      // last units went while the shopper was filling the form. Both send them
+      // back to re-select rather than inviting a blind retry.
+      if (caught instanceof ApiError && caught.code === 'PRICE_CHANGED') {
+        setError(t('checkout.priceChanged'));
+      } else if (caught instanceof ApiError && caught.code === 'INVENTORY_UNAVAILABLE') {
+        setError(t('checkout.soldOut'));
+      } else {
+        setError(caught instanceof ApiError ? caught.message : t('checkout.couldNotStartBooking'));
+      }
       return null;
     } finally {
       setBusy(false);

@@ -4,13 +4,15 @@
     // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        
     
 
         {
-            "type": "aspire",
+            "type": "node",
             "request": "launch",
-            "name": "Aspire: 启动默认 apphost",
-            "program": ""
+            "name": "Launch Node",
+            "program": "${workspaceFolder}/src/index.js",
+            "console": "integratedTerminal"
         },
         {
             "type": "node",
@@ -22,7 +24,7 @@
         },
         {
             "name": "Python 调试程序: 当前文件",
-            "type": "debugpy",
+            "type": "node",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal"

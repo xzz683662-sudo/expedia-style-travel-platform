@@ -78,6 +78,19 @@ export const config = {
       detailTtlSeconds: int('SUPPLY_LIVE_DETAIL_TTL', 60),
       availabilityTtlSeconds: int('SUPPLY_LIVE_AVAILABILITY_TTL', 30),
       /**
+       * Maximum tolerated gap between a live net rate and the catalogue's own
+       * `TicketType.basePriceCents` at checkout, in basis points.
+       *
+       * `0` (the default) disables the guard, and that is a correctness choice
+       * rather than caution: a live rate is *expected* to differ from the seeded
+       * catalogue figure, so enforcing equality would reject every order the
+       * moment a live source is switched on. Set a non-zero value when the
+       * catalogue price is meant to act as a ceiling and a larger move should
+       * send the shopper back to re-select rather than silently charge a
+       * different number.
+       */
+      checkoutToleranceBps: int('SUPPLY_LIVE_CHECKOUT_TOLERANCE_BPS', 0),
+      /**
        * Hosts whose images may be written to `ProductMedia.url`.
        *
        * An allow-list rather than a proxy: `next.config.ts` needs a matching
