@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { normaliseApifyRow, stripPii } from '../src/modules/inventory-feed/scraper';
+import { normaliseApifyRow, stripPii, type StagedRow } from '../src/modules/inventory-feed/scraper';
 
 /**
  * Offline contract gate for the inventory feed — `pnpm inventory:contract`.
@@ -142,7 +142,47 @@ check('a row with no name is refused', normaliseApifyRow({ id: '9' }, ctx) === n
 check('staged row exposes no basePriceCents', good !== null && !('basePriceCents' in (good as unknown as Record<string, unknown>)));
 
 // ---------------------------------------------------------------------------
-// 4. Positioning record
+// 4. Offline fixture path
+// ---------------------------------------------------------------------------
+// The live actor is 429-throttled by default, so the staging → promote → search
+// chain would otherwise be unprovable. These assertions keep the offline dataset
+// honest and make sure the fixture path stages through the same normaliser the
+// live path uses — a fixture that drifted from production would prove nothing.
+console.log('\nOffline fixture ingest (the pipeline without a live upstream)');
+
+check('scraper.ts exposes the offline ingest entry point', /export async function ingestFixtureRows/.test(scraper));
+
+const fixturePath = resolve(ROOT, 'prisma/fixtures/expedia-hotels.sample.json');
+check('fixture dataset exists', existsSync(fixturePath));
+
+if (existsSync(fixturePath)) {
+  const fixtureRows = JSON.parse(readFileSync(fixturePath, 'utf8')) as unknown[];
+  const normalised = fixtureRows
+    .map((row) => normaliseApifyRow(row, { source: 'fixture:contract', runId: null, cityHint: 'Amsterdam' }))
+    .filter((row): row is StagedRow => row !== null);
+
+  check('the fixture yields usable rows', normalised.length >= 3, `${normalised.length} usable of ${fixtureRows.length}`);
+  check(
+    'rows with no id or no name are skipped, never invented',
+    normalised.length < fixtureRows.length,
+    `${fixtureRows.length - normalised.length} skipped of ${fixtureRows.length}`,
+  );
+  check(
+    'the fixture proves reviewer PII is stripped',
+    !JSON.stringify(normalised.map((row) => row.raw)).includes('jane.doe@example.com'),
+  );
+  check(
+    'fixture rows expose no sellable price key',
+    normalised.every((row) => !('basePriceCents' in (row as unknown as Record<string, unknown>))),
+  );
+  check(
+    'fixture prices are integer minor units',
+    normalised.some((row) => Number.isInteger(row.priceCents) && (row.priceCents ?? 0) > 0),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 5. Positioning record
 // ---------------------------------------------------------------------------
 console.log('\nPositioning decision recorded');
 const adr = resolve(ROOT, '../../docs/adr/0001-inventory-feed-positioning.md');

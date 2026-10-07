@@ -52,10 +52,12 @@ import { cacheGet, cacheSet, cacheDelete, closeRedis } from '../src/utils/redis'
 import {
   LiveRateFinder,
   type LiveOffer,
+  type LiveQuote,
   type LiveRateQuery,
   type LiveRateSource,
 } from '../src/modules/supply/live';
 import { liveRateSources } from '../src/modules/supply/live-adapters';
+import { evaluateCheckoutLive } from '../src/modules/supply/live-checkout';
 import { warmKeyFor, TRVL_NATIVE_CURRENCY, TRVL_SOURCE_ID } from '../src/modules/supply/trvl-source';
 
 let pass = 0;
@@ -274,6 +276,122 @@ async function main(): Promise<void> {
     disabled.quote === null && disabled.degraded === false && off.enabled === false,
     `quote=${JSON.stringify(disabled.quote)} degraded=${String(disabled.degraded)} enabled=${String(off.enabled)}`,
   );
+
+  head('Checkout re-validation');
+
+  // `evaluateCheckoutLive` is deliberately pure (no Prisma, no network, no
+  // clock), which is what lets the safety-critical part of checkout be asserted
+  // here — offline, on a fresh clone, with no binary and no credential. The
+  // engine only turns a verdict into an AppError.
+  const CATALOG = 40_000;
+  const liveQuote = (overrides: Partial<LiveQuote> = {}): LiveQuote => ({
+    netPriceCents: CATALOG,
+    currency: SETTLEMENT,
+    sellable: null,
+    sourceId: TRVL_SOURCE_ID,
+    fetchedAt: Date.now(),
+    fromCache: false,
+    ...overrides,
+  });
+
+  // No source answered: the catalogue price stands and nothing is refused. This
+  // is the intended degradation, not an error.
+  const noQuote = evaluateCheckoutLive({
+    quote: null,
+    quantity: 2,
+    catalogBasePriceCents: CATALOG,
+    toleranceBps: 0,
+  });
+  check(
+    'a null quote falls back to the catalogue price',
+    noQuote.kind === 'ok' && noQuote.basePriceCents === CATALOG,
+    `verdict=${JSON.stringify(noQuote)}`,
+  );
+
+  // `sellable: null` means "the source did not say". A source that cannot prove
+  // stock must not overrule the inventory engine, which already agreed to hold.
+  const unknownStock = evaluateCheckoutLive({
+    quote: liveQuote({ sellable: null }),
+    quantity: 4,
+    catalogBasePriceCents: CATALOG,
+    toleranceBps: 0,
+  });
+  check(
+    'sellable null never blocks a sale',
+    unknownStock.kind === 'ok',
+    `verdict=${JSON.stringify(unknownStock)}`,
+  );
+
+  // `sellable: 0` is a real answer: confirmed sold out. Blocks before any hold.
+  const soldOutQuote = evaluateCheckoutLive({
+    quote: liveQuote({ sellable: 0 }),
+    quantity: 1,
+    catalogBasePriceCents: CATALOG,
+    toleranceBps: 0,
+  });
+  check(
+    'sellable 0 blocks checkout',
+    soldOutQuote.kind === 'sold_out' && soldOutQuote.available === 0,
+    `verdict=${JSON.stringify(soldOutQuote)}`,
+  );
+
+  // A real count below the requested quantity blocks; at or above it does not.
+  const shortStock = evaluateCheckoutLive({
+    quote: liveQuote({ sellable: 2 }),
+    quantity: 3,
+    catalogBasePriceCents: CATALOG,
+    toleranceBps: 0,
+  });
+  const enoughStock = evaluateCheckoutLive({
+    quote: liveQuote({ sellable: 3 }),
+    quantity: 3,
+    catalogBasePriceCents: CATALOG,
+    toleranceBps: 0,
+  });
+  check(
+    'a count below the requested quantity blocks',
+    shortStock.kind === 'sold_out' && shortStock.requested === 3,
+    `verdict=${JSON.stringify(shortStock)}`,
+  );
+  check('a count equal to the requested quantity allows', enoughStock.kind === 'ok');
+
+  // Tolerance 0 (the default) disables the drift guard on purpose: a live rate
+  // is *expected* to differ from the seeded figure, so enforcing equality would
+  // reject every order the moment a source is switched on.
+  const noGuard = evaluateCheckoutLive({
+    quote: liveQuote({ netPriceCents: CATALOG * 3 }),
+    quantity: 1,
+    catalogBasePriceCents: CATALOG,
+    toleranceBps: 0,
+  });
+  check(
+    'tolerance 0 never reports price_changed',
+    noGuard.kind === 'ok' && noGuard.basePriceCents === CATALOG * 3,
+    `verdict=${JSON.stringify(noGuard)}`,
+  );
+
+  // With a guard set, a move beyond it is refused with both figures attached so
+  // the client can explain the difference; a move inside it passes.
+  const drifted = evaluateCheckoutLive({
+    quote: liveQuote({ netPriceCents: CATALOG + 5_000 }),
+    quantity: 1,
+    catalogBasePriceCents: CATALOG,
+    toleranceBps: 500,
+  });
+  const within = evaluateCheckoutLive({
+    quote: liveQuote({ netPriceCents: CATALOG + 100 }),
+    quantity: 1,
+    catalogBasePriceCents: CATALOG,
+    toleranceBps: 500,
+  });
+  check(
+    'drift beyond the tolerance yields price_changed with both figures',
+    drifted.kind === 'price_changed' &&
+      drifted.previousUnitPriceCents === CATALOG &&
+      drifted.currentUnitPriceCents === CATALOG + 5_000,
+    `verdict=${JSON.stringify(drifted)}`,
+  );
+  check('drift inside the tolerance passes', within.kind === 'ok');
 
   head('Cache hygiene');
   await cacheDelete(warmerKey);

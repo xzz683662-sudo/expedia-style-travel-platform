@@ -81,7 +81,7 @@ function toSupportMethod(method: {
 
 const lookupQuery = z.object({
   q: z.string().trim().min(2).max(120).optional(),
-  role: z.enum(['CUSTOMER', 'SUPPORT', 'OPERATOR', 'MERCHANT', 'ADMIN']).optional(),
+  role: z.enum(['CUSTOMER', 'SUPPORT', 'ADMIN']).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: z.string().optional(),
 });

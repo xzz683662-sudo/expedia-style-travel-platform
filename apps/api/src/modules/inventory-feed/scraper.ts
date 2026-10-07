@@ -427,6 +427,98 @@ function safeDate(value: string): Date | null {
 // Ingest
 // ---------------------------------------------------------------------------
 
+/**
+ * Stages one already-normalised row. Returns which bucket it landed in.
+ *
+ * Extracted so the live Apify path and the offline fixture path stage through
+ * the *same* code. The idempotence rules live here and nowhere else, which is
+ * what makes them hold for both: a re-run updates in place, and a `REJECTED`
+ * row is never resurrected by a later sync.
+ */
+async function stageNormalisedRow(staged: StagedRow, meta: { source: string; runId: string | null }): Promise<'inserted' | 'updated'> {
+  const existing = await prisma.scrapedInventory.findUnique({
+    where: { source_externalId: { source: meta.source, externalId: staged.externalId } },
+    select: { id: true, status: true },
+  });
+
+  if (existing) {
+    // A `REJECTED` row is deliberately not resurrected: refreshing it would
+    // silently undo an operator's decision. We only bump `syncedAt`.
+    await prisma.scrapedInventory.update({
+      where: { id: existing.id },
+      data:
+        existing.status === ScrapedStatus.REJECTED
+          ? { syncedAt: new Date() }
+          : {
+              sourceRunId: meta.runId,
+              name: staged.name,
+              citySlug: staged.citySlug,
+              countryCode: staged.countryCode,
+              latitude: staged.latitude,
+              longitude: staged.longitude,
+              starRating: staged.starRating,
+              propertyUrl: staged.propertyUrl,
+              priceCents: staged.priceCents,
+              currency: staged.currency,
+              rawPriceText: staged.rawPriceText,
+              checkIn: staged.checkIn,
+              checkOut: staged.checkOut,
+              raw: staged.raw,
+              externalRef: staged.externalRef,
+              syncedAt: new Date(),
+              // A STALE row that reappears upstream is reviewable again.
+              ...(existing.status === ScrapedStatus.STALE ? { status: ScrapedStatus.NEW } : {}),
+            },
+    });
+    return 'updated';
+  }
+
+  await prisma.scrapedInventory.create({
+    data: {
+      source: meta.source,
+      externalId: staged.externalId,
+      sourceRunId: meta.runId,
+      externalRef: staged.externalRef,
+      name: staged.name,
+      citySlug: staged.citySlug,
+      countryCode: staged.countryCode,
+      latitude: staged.latitude,
+      longitude: staged.longitude,
+      starRating: staged.starRating,
+      propertyUrl: staged.propertyUrl,
+      priceCents: staged.priceCents,
+      currency: staged.currency,
+      rawPriceText: staged.rawPriceText,
+      checkIn: staged.checkIn,
+      checkOut: staged.checkOut,
+      raw: staged.raw,
+    },
+  });
+  return 'inserted';
+}
+
+/** Normalises a batch of raw payloads and stages each one through {@link stageNormalisedRow}. */
+async function stageRawPayloads(
+  rows: unknown[],
+  ctx: NormaliseContext,
+): Promise<{ inserted: number; updated: number; skipped: number }> {
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const raw of rows) {
+    const staged = normaliseApifyRow(raw, ctx);
+    if (!staged) {
+      skipped += 1;
+      continue;
+    }
+    const bucket = await stageNormalisedRow(staged, { source: ctx.source, runId: ctx.runId });
+    if (bucket === 'inserted') inserted += 1;
+    else updated += 1;
+  }
+  return { inserted, updated, skipped };
+}
+
 export interface IngestInput {
   location: string[];
   checkIn?: string;
@@ -473,88 +565,97 @@ export async function ingestApifyHotels(input: IngestInput): Promise<IngestSumma
 
   const rows = await fetchDatasetItems(datasetId, limit);
   const source = `apify:${config.inventoryFeed.apifyActor}`;
-  let inserted = 0;
-  let updated = 0;
-  let skipped = 0;
 
-  for (const raw of rows) {
-    const staged = normaliseApifyRow(raw, {
-      source,
-      runId,
-      cityHint: input.location[0],
-      checkIn: input.checkIn,
-      checkOut: input.checkOut,
-    });
-    if (!staged) {
-      skipped += 1;
-      continue;
-    }
-
-    const existing = await prisma.scrapedInventory.findUnique({
-      where: { source_externalId: { source, externalId: staged.externalId } },
-      select: { id: true, status: true },
-    });
-
-    if (existing) {
-      // A `REJECTED` row is deliberately not resurrected: refreshing it would
-      // silently undo an operator's decision. We only bump `syncedAt`.
-      await prisma.scrapedInventory.update({
-        where: { id: existing.id },
-        data:
-          existing.status === ScrapedStatus.REJECTED
-            ? { syncedAt: new Date() }
-            : {
-                sourceRunId: runId,
-                name: staged.name,
-                citySlug: staged.citySlug,
-                countryCode: staged.countryCode,
-                latitude: staged.latitude,
-                longitude: staged.longitude,
-                starRating: staged.starRating,
-                propertyUrl: staged.propertyUrl,
-                priceCents: staged.priceCents,
-                currency: staged.currency,
-                rawPriceText: staged.rawPriceText,
-                checkIn: staged.checkIn,
-                checkOut: staged.checkOut,
-                raw: staged.raw,
-                externalRef: staged.externalRef,
-                syncedAt: new Date(),
-                // A STALE row that reappears upstream is reviewable again.
-                ...(existing.status === ScrapedStatus.STALE ? { status: ScrapedStatus.NEW } : {}),
-              },
-      });
-      updated += 1;
-    } else {
-      await prisma.scrapedInventory.create({
-        data: {
-          source,
-          externalId: staged.externalId,
-          sourceRunId: runId,
-          externalRef: staged.externalRef,
-          name: staged.name,
-          citySlug: staged.citySlug,
-          countryCode: staged.countryCode,
-          latitude: staged.latitude,
-          longitude: staged.longitude,
-          starRating: staged.starRating,
-          propertyUrl: staged.propertyUrl,
-          priceCents: staged.priceCents,
-          currency: staged.currency,
-          rawPriceText: staged.rawPriceText,
-          checkIn: staged.checkIn,
-          checkOut: staged.checkOut,
-          raw: staged.raw,
-        },
-      });
-      inserted += 1;
-    }
-  }
+  const { inserted, updated, skipped } = await stageRawPayloads(rows, {
+    source,
+    runId,
+    cityHint: input.location[0],
+    checkIn: input.checkIn,
+    checkOut: input.checkOut,
+  });
 
   const summary: IngestSummary = { fetched: rows.length, inserted, updated, skipped, runId, status };
   // Spread into a fresh object literal: `IngestSummary` is an interface, which has no
   // implicit index signature, so it is not assignable to the logger's `Record<string, unknown>`.
   logger.info('inventory_feed.ingest_done', { ...summary });
+  return summary;
+}
+
+// ---------------------------------------------------------------------------
+// Offline fixture ingest — "some data in the database" without a live upstream
+// ---------------------------------------------------------------------------
+
+/**
+ * Default provenance for fixture-staged rows.
+ *
+ * Deliberately *not* `apify:<actor>`: these rows were not fetched, and a row
+ * whose `source` claims otherwise is a lie the review queue would repeat. A
+ * distinct prefix also makes them trivially filterable and cleanable
+ * (`deleteMany({ where: { source: FIXTURE_SOURCE } })`).
+ */
+export const FIXTURE_SOURCE = 'fixture:expedia-hotels';
+
+export interface FixtureIngestInput {
+  /** Raw payloads in the actor's output shape — captured earlier, or hand-written. */
+  rows: unknown[];
+  cityHint?: string;
+  checkIn?: string;
+  checkOut?: string;
+  /** Overrides {@link FIXTURE_SOURCE} so a caller can namespace per dataset. */
+  source?: string;
+}
+
+export interface FixtureIngestSummary {
+  source: string;
+  fetched: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+}
+
+/**
+ * Stages payloads from a stored sample rather than from Apify.
+ *
+ * Why this exists
+ * ---------------
+ * The live actor's measured reliability makes it unusable as the *only* way to
+ * put a row in the database: 30-day stats are **29 succeeded of 27,214 runs
+ * (0.107%)**, and a re-probe on 2026-07-10 got `error: Too Many Requests` on a
+ * city search. Its default egress is Apify's *shared* residential pool, which
+ * Expedia throttles across every user of the actor, so the fix is an
+ * operator-supplied proxy (`APIFY_HOTEL_PROXY_CONFIG` → `dev_proxy_config`) —
+ * not more retries.
+ *
+ * Until that egress exists, the review → promote → search chain would be
+ * unexercisable end to end, and an unexercised chain is one nobody has proven.
+ * This function closes that gap honestly: it stages **sample** rows, labelled
+ * as sample, through the *same* normaliser and the *same* staging helper the
+ * live path uses — so the mapping, the PII stripping, the idempotence and the
+ * promote step are all genuinely exercised, and swapping in the live actor is a
+ * config change rather than a rewrite.
+ *
+ * What it does NOT do
+ * -------------------
+ * Same blast radius as every other function here: it writes **only**
+ * `ScrapedInventory`. Nothing becomes sellable — a human still has to promote
+ * the row, and even then it lands as `DRAFT`.
+ */
+export async function ingestFixtureRows(input: FixtureIngestInput): Promise<FixtureIngestSummary> {
+  const source = input.source ?? FIXTURE_SOURCE;
+  if (!Array.isArray(input.rows) || input.rows.length === 0) {
+    return { source, fetched: 0, inserted: 0, updated: 0, skipped: 0 };
+  }
+
+  const { inserted, updated, skipped } = await stageRawPayloads(input.rows, {
+    source,
+    runId: null,
+    cityHint: input.cityHint,
+    checkIn: input.checkIn,
+    checkOut: input.checkOut,
+  });
+
+  const summary: FixtureIngestSummary = { source, fetched: input.rows.length, inserted, updated, skipped };
+  logger.info('inventory_feed.fixture_ingest_done', { ...summary });
   return summary;
 }
 

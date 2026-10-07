@@ -16,6 +16,7 @@ export type ErrorCode =
   | 'INVENTORY_UNAVAILABLE'
   | 'INVENTORY_EXPIRED'
   | 'PRICE_CHANGED'
+  | 'EMAIL_NOT_VERIFIED'
   | 'PAYMENT_FAILED'
   | 'TICKET_ALREADY_REDEEMED'
   | 'RATE_LIMITED'
@@ -69,6 +70,18 @@ export class AppError extends Error {
 
   static priceChanged(message: string, details?: unknown) {
     return new AppError(409, 'PRICE_CHANGED', message, details);
+  }
+
+  /**
+   * Checkout is blocked until the shopper confirms their email address.
+   *
+   * 403 rather than 409: the request is well-formed and the cart is valid —
+   * what is missing is a precondition on the *account*, and the client's fix is
+   * to verify, not to re-select. The web client branches on the code to show a
+   * "verify your email" call to action instead of a generic error.
+   */
+  static emailNotVerified(message = 'Please verify your email address to continue') {
+    return new AppError(403, 'EMAIL_NOT_VERIFIED', message);
   }
 
   static paymentFailed(message: string, details?: unknown) {

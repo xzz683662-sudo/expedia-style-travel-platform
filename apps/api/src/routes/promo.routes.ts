@@ -147,7 +147,7 @@ export const promoRoutes: FastifyPluginAsync = async (app) => {
     locales: z.array(z.string()).max(20).default([]),
   });
 
-  app.get('/admin/promo/banners', { preHandler: requireRole('ADMIN', 'MERCHANT') }, async (request) => {
+  app.get('/admin/promo/banners', { preHandler: requireRole('ADMIN') }, async (request) => {
     const query = z
       .object({
         slot: z.string().optional(),

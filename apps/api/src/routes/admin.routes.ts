@@ -16,7 +16,7 @@ import { hashPassword } from '../utils/crypto';
  * catalogue, inventory, orders, finance and gate operations.
  */
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
-  const staff = { preHandler: [requireRole('OPERATOR', 'ADMIN', 'MERCHANT')] };
+  const staff = { preHandler: [requireRole('ADMIN')] };
   const adminOnly = { preHandler: [requireRole('ADMIN')] };
 
   // -------------------------------------------------------------------------

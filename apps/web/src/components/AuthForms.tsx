@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
 import { saveSession } from '@/lib/session';
 import type { LocaleCode } from '@/lib/i18n/config';
@@ -12,8 +12,7 @@ import { createTranslator } from '@/lib/i18n/dictionaries';
 const DEMO_ACCOUNTS = [
   { email: 'traveler@easytrip.test', key: 'auth.demoTraveller' },
   { email: 'admin@easytrip.test', key: 'auth.demoAdmin' },
-  { email: 'operator@easytrip.test', key: 'auth.demoOperator' },
-  { email: 'merchant@easytrip.test', key: 'auth.demoMerchant' },
+  { email: 'support@easytrip.test', key: 'auth.demoSupport' },
 ] as const;
 
 function nextPath(raw: string | null): string {
@@ -127,6 +126,23 @@ export function RegisterForm({ locale }: { locale: LocaleCode }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // --- Verification step ---
+  // Registration no longer signs the shopper straight in: the account exists but
+  // the address is unconfirmed, and checkout is gated on it. The form therefore
+  // has two steps, and the second one is the same code box the header banner
+  // links to.
+  const [step, setStep] = useState<'details' | 'verify'>('details');
+  const [code, setCode] = useState('');
+  const [devCode, setDevCode] = useState<string | null>(null);
+  const [cooldown, setCooldown] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = setInterval(() => setCooldown((value) => Math.max(0, value - 1)), 1000);
+    return () => clearInterval(timer);
+  }, [cooldown]);
+
   function update(key: keyof typeof form, value: string) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
@@ -144,16 +160,105 @@ export function RegisterForm({ locale }: { locale: LocaleCode }) {
         lastName: form.lastName.trim() || '',
       });
       saveSession(result.token, result.user);
-      router.push('/orders');
-      router.refresh();
+      setDevCode(result.emailVerification?.devCode ?? null);
+      setCooldown(30);
+      setStep('verify');
+      setBusy(false);
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : t('auth.couldNotRegister'));
       setBusy(false);
     }
   }
 
+  async function verify(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+
+    try {
+      await api.verifyEmail({ email: form.email.trim(), code: code.trim() });
+      setNotice(t('auth.verifySuccess'));
+      router.push('/orders');
+      router.refresh();
+    } catch (caught) {
+      setError(caught instanceof ApiError ? t('auth.verifyFailed') : t('auth.verifyFailed'));
+      setBusy(false);
+    }
+  }
+
+  async function resend() {
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.resendVerification({ email: form.email.trim() });
+      if (result.devCode) setDevCode(result.devCode);
+      // 45s is the API's cooldown; mirroring it here avoids a guaranteed 429.
+      setCooldown(45);
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.code === 'RATE_LIMITED') {
+        setCooldown(45);
+      } else {
+        setError(t('auth.verifyFailed'));
+      }
+    }
+  }
+
+  if (step === 'verify') {
+    return (
+      <form className="card card-pad stack" onSubmit={verify} data-testid="verify-form">
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18 }}>{t('auth.verifyTitle')}</h2>
+          <p className="small muted" style={{ margin: '4px 0 0' }}>
+            {t('auth.verifySubtitle', form.email.trim())}
+          </p>
+        </div>
+
+        {devCode && <p className="small badge badge-info" data-testid="dev-code">{t('auth.devCodeHint', devCode)}</p>}
+
+        <label className="field">
+          <span className="label">{t('auth.verifyCode')}</span>
+          <input
+            className="input mono"
+            required
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            placeholder={t('auth.verifyCodePlaceholder')}
+            value={code}
+            onChange={(event) => setCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+            data-testid="verify-code"
+            style={{ letterSpacing: '0.4em', fontSize: 20 }}
+          />
+        </label>
+
+        {error && <p className="form-error">{error}</p>}
+        {notice && <p className="small good-text">{notice}</p>}
+
+        <button className="btn btn-primary btn-block" disabled={busy || code.length !== 6} data-testid="verify-submit">
+          {busy ? t('auth.verifying') : t('auth.verifyAction')}
+        </button>
+
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={cooldown > 0}
+            onClick={resend}
+            data-testid="resend-code"
+          >
+            {cooldown > 0 ? t('auth.resendIn', cooldown) : t('auth.resendCode')}
+          </button>
+          <Link className="small" href="/orders">
+            {t('auth.skipForNow')}
+          </Link>
+        </div>
+      </form>
+    );
+  }
+
   return (
-    <form className="card card-pad stack" onSubmit={submit}>
+    <form className="card card-pad stack" onSubmit={submit} data-testid="register-form">
       <div className="row" style={{ gap: 'var(--sp-3)' }}>
         <label className="field grow">
           <span className="label">{t('auth.firstName')}</span>

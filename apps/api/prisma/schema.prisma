@@ -28,14 +28,21 @@ datasource db {
 // Identity & tenancy
 // ===========================================================================
 
+/// Two staff surfaces, and only two: `/admin` (operations) and `/support`
+/// (customer service).
+///
+/// `MERCHANT` and `OPERATOR` were folded in deliberately — the gate scanner and
+/// the partner-merchant views are ADMIN capabilities now rather than roles of
+/// their own. A third role is a third set of permissions to get wrong, and the
+/// two-surface console already models the split the platform actually needs.
+/// See docs/adr/0002-two-staff-surfaces.md.
 enum UserRole {
   CUSTOMER
-  MERCHANT
-  // Gate staff: can verify and redeem tickets, nothing else.
-  OPERATOR
-  // Customer support: can look up orders and users and issue refunds, but
-  // cannot change catalogue, pricing or other people's balances.
+  // Customer support: can look up orders and users, adjust records and issue
+  // refunds, but cannot change catalogue, pricing or other people's balances.
   SUPPORT
+  // Operations: everything SUPPORT can do, plus the catalogue, pricing,
+  // inventory, promo banners and gate scanning.
   ADMIN
 }
 
@@ -75,6 +82,11 @@ model User {
   walletLedger     WalletTransaction[]
   paymentMethods   PaymentMethod[]
 
+  emailVerifications    EmailVerificationCode[]
+  supportConversations  SupportConversation[] @relation("ConversationCustomer")
+  assignedConversations SupportConversation[] @relation("ConversationAssignee")
+  supportMessages       SupportMessage[]
+
   @@index([role])
 }
 
@@ -88,6 +100,36 @@ model UserSession {
   expiresAt DateTime
 
   @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Email verification
+//
+// Registration issues a short numeric code instead of trusting the address
+// immediately. Only a hash of the code is stored — the same reasoning as
+// `User.passwordHash`: a leaked database must not hand an attacker a working
+// code for every account. Codes are single-use and expire.
+// ---------------------------------------------------------------------------
+
+model EmailVerificationCode {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the code. The plaintext is never persisted.
+  codeHash String
+  /// How long this code stays valid.
+  expiresAt DateTime
+  /// Set the moment the code is accepted, so a reused code matches zero rows
+  /// and is rejected without a special case.
+  consumedAt DateTime?
+  /// Wrong guesses so far. Past a small threshold the code is treated as dead,
+  /// which caps online brute-force of a six-digit space.
+  attempts Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, consumedAt])
 }
 
 model TravelerProfile {
@@ -1222,6 +1264,8 @@ model Order {
   orderStatusLogs OrderStatusLog[]
   transferLegs    TransferLeg[]
 
+  supportConversations SupportConversation[]
+
   @@index([status, placedAt])
   @@index([userId, placedAt])
   @@index([contactEmail])
@@ -1877,6 +1921,82 @@ model AuditLog {
 
   @@index([entityType, entityId])
   @@index([createdAt])
+}
+
+// ===========================================================================
+// Customer support chat
+//
+// An embedded conversation between a signed-in shopper and the support console.
+// Deliberately a *durable thread*, not a transient socket: the WebSocket pushes
+// new messages live, but every message is a row, so the widget and the inbox
+// both rehydrate from Postgres after a reload. Realtime is the push; this is
+// the record — the same split used by `Notification`.
+// ===========================================================================
+
+enum SupportConversationStatus {
+  OPEN
+  CLOSED
+}
+
+enum SupportAuthorType {
+  CUSTOMER
+  AGENT
+  // Platform-generated lines: "Casey joined the chat", "Conversation closed".
+  SYSTEM
+}
+
+model SupportConversation {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation("ConversationCustomer", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Optional link to the order the shopper is asking about, so an agent opens
+  /// the thread with context instead of hunting for the order number.
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  subject String
+
+  status           SupportConversationStatus @default(OPEN)
+  assignedToUserId String?
+  assignedTo       User?                    @relation("ConversationAssignee", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+
+  /// Unread counters are maintained on write rather than aggregated on read, so
+  /// the widget and inbox badges are a single indexed lookup. `customerUnread`
+  /// counts agent messages the shopper has not seen; `staffUnread` the reverse.
+  customerUnread Int @default(0)
+  staffUnread    Int @default(0)
+
+  /// Denormalised from the newest message so a conversation list can be sorted
+  /// and rendered without loading every message.
+  lastMessageAt DateTime @default(now())
+  lastPreview   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages SupportMessage[]
+
+  @@index([userId, status])
+  @@index([status, lastMessageAt])
+  @@index([assignedToUserId])
+}
+
+model SupportMessage {
+  id             String              @id @default(cuid())
+  conversationId String
+  conversation   SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  authorType   SupportAuthorType
+  authorUserId String?
+  author       User?              @relation(fields: [authorUserId], references: [id], onDelete: SetNull)
+
+  body      String
+  createdAt DateTime @default(now())
+  /// When the *recipient* read it. Null on the author's own message.
+  readAt    DateTime?
+
+  @@index([conversationId, createdAt])
 }
 
 // Daily revenue aggregates powering the operator dashboard.

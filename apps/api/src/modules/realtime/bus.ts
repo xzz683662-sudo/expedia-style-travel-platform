@@ -38,7 +38,7 @@ import { createSubscriberClient, getRedis, hasRealRedis } from '../../utils/redi
 export const REALTIME_CHANNEL = 'easytrip:realtime';
 
 /** Staff roles that are allowed to observe operational (cross-customer) events. */
-export const STAFF_ROLES = ['ADMIN', 'SUPPORT', 'OPERATOR', 'MERCHANT'] as const;
+export const STAFF_ROLES = ['ADMIN', 'SUPPORT'] as const;
 
 export type RealtimeAudience = {
   /** Deliver to this shopper's personal topic. */

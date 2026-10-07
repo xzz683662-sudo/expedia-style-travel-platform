@@ -25,7 +25,7 @@ import { promoteScrapedRow, rejectScrapedRow } from '../modules/inventory-feed/p
  */
 export async function inventoryFeedRoutes(app: FastifyInstance): Promise<void> {
   const adminOnly = { preHandler: [feedEnabled, requireRole('ADMIN')] };
-  const staff = { preHandler: [feedEnabled, requireRole('OPERATOR', 'ADMIN')] };
+  const staff = { preHandler: [feedEnabled, requireRole('ADMIN')] };
 
   // -------------------------------------------------------------------------
   // Review queue

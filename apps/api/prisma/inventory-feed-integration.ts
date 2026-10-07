@@ -1,6 +1,8 @@
 import { InventorySource, ProductStatus, ScrapedStatus } from '@prisma/client';
 import { prisma } from '../src/lib/prisma';
 import { promoteScrapedRow, rejectScrapedRow } from '../src/modules/inventory-feed/promote';
+import { FIXTURE_SOURCE, ingestFixtureRows } from '../src/modules/inventory-feed/scraper';
+import { indexProduct, searchProducts } from '../src/modules/search/service';
 
 /**
  * Integration check for the inventory feed's promotion step — Step 6 of the
@@ -159,10 +161,95 @@ async function main(): Promise<void> {
   }
   check('a rejected row cannot be promoted', promoteRejectedThrew);
 
+  // --- offline ingest → promote → search hit -------------------------------
+  // The chain an operator actually cares about, with no live upstream in the
+  // loop: a staged row becomes a first-party product and is then *findable* by
+  // the search module. `promoteScrapedRow` already calls `indexProduct`, so
+  // publishing is the only extra step search needs.
+  //
+  // This is why `ingestFixtureRows` exists: the live actor is 429-throttled by
+  // default (`error: Too Many Requests`, re-probed 2026-07-10), so without an
+  // offline path the staging → promote → search chain could not be proven at
+  // all — and an unproven chain is one nobody has really built.
+  const fixtureName = `Fixture Search Hotel ${RUN}`;
+  const fixtureExternalId = `F-${RUN}`;
+  const fixtureIngest = await ingestFixtureRows({
+    rows: [
+      {
+        id: fixtureExternalId,
+        name: fixtureName,
+        starRating: 4,
+        latitude: 52.37,
+        longitude: 4.89,
+        countryCode: 'NL',
+        propertyUrl: 'https://www.expedia.com/Amsterdam-Hotels-Fixture.hF.Hotel-Information',
+        price: { amount: 210.5, currency: 'USD' },
+        reviews: [{ reviewer: 'Fixture Person', email: 'fixture@example.com', rating: 5, text: 'ok' }],
+      },
+    ],
+    cityHint: 'Amsterdam',
+    source: FIXTURE_SOURCE,
+  });
+  check('fixture ingest stages one row', fixtureIngest.inserted === 1, JSON.stringify(fixtureIngest));
+
+  const fixtureRow = await prisma.scrapedInventory.findUnique({
+    where: { source_externalId: { source: FIXTURE_SOURCE, externalId: fixtureExternalId } },
+  });
+  check('the fixture row is staged', fixtureRow !== null);
+  check('the scraped price is stored as evidence only', fixtureRow?.priceCents === 21_050, `=${fixtureRow?.priceCents}`);
+  const fixtureRaw = JSON.stringify(fixtureRow?.raw ?? {});
+  check(
+    'reviewer PII never reached storage',
+    !fixtureRaw.includes('fixture@example.com') && !fixtureRaw.includes('Fixture Person'),
+    'stripPii runs on the way in, so the redacted shape is the only one stored',
+  );
+
+  const fixturePromoted = await promoteScrapedRow({
+    scrapedId: fixtureRow!.id,
+    actorId: 'integration-test',
+    costCents: 15_000,
+    basePriceCents: 24_900,
+    currency: 'USD',
+    destinationSlug: destination.slug,
+    nameEn: fixtureName,
+  });
+
+  // A promoted product ships with NO inventory — by design. `promote.ts`
+  // refuses to invent stock from a nightly snapshot, because a snapshot does not
+  // know what sold today: the platform owns what it sells and seeds it
+  // explicitly. Search, however, only lists products that have a bookable date
+  // (`available <= 0` is dropped), so an operator MUST seed inventory before a
+  // promoted row can be found. Skipping this step leaves the product indexed but
+  // unfindable — which is precisely the failure this assertion caught.
+  const serviceDate = new Date(Date.now() + 30 * 86_400_000);
+  serviceDate.setUTCHours(0, 0, 0, 0);
+  await prisma.inventoryRecord.create({
+    data: { ticketTypeId: fixturePromoted.ticketTypeId, serviceDate, capacityTotal: 5 },
+  });
+
+  // A promotion lands as DRAFT on purpose; search lists only PUBLISHED rows.
+  // Publishing and indexing both happen *after* the inventory exists, because
+  // `indexProduct` derives the product's next bookable date from it.
+  await prisma.product.update({ where: { id: fixturePromoted.productId }, data: { status: ProductStatus.PUBLISHED } });
+  await indexProduct(fixturePromoted.productId);
+
+  const found = await searchProducts({ query: fixtureName, pageSize: 10 });
+  const hit = found.items.find((item) => item.productId === fixturePromoted.productId);
+  check('the promoted product is discoverable in search', hit !== undefined, `engine=${found.engine} total=${found.total}`);
+  check('the search hit carries the operator price, not the scraped one', hit?.priceCents === 24_900, `=${hit?.priceCents}`);
+  const docCount = await prisma.searchDocument.count({ where: { productId: fixturePromoted.productId } });
+  check('a search document was projected', docCount >= 1, `=${docCount}`);
+
   // --- cleanup --------------------------------------------------------------
-  await prisma.auditLog.deleteMany({ where: { entityId: { in: [promoted.productId, stagedB.id] } } });
-  await prisma.product.delete({ where: { id: promoted.productId } }).catch(() => undefined);
-  await prisma.scrapedInventory.deleteMany({ where: { source: SOURCE } });
+  await prisma.auditLog.deleteMany({
+    where: { entityId: { in: [promoted.productId, stagedB.id, fixtureRow!.id, fixturePromoted.productId] } },
+  });
+  await prisma.searchDocument.deleteMany({
+    where: { productId: { in: [promoted.productId, fixturePromoted.productId] } },
+  });
+  await prisma.inventoryRecord.deleteMany({ where: { ticketTypeId: fixturePromoted.ticketTypeId } });
+  await prisma.product.deleteMany({ where: { id: { in: [promoted.productId, fixturePromoted.productId] } } });
+  await prisma.scrapedInventory.deleteMany({ where: { source: { in: [SOURCE, FIXTURE_SOURCE] } } });
 
   const afterCleanup = await counts();
   check('cleanup restores the baseline', afterCleanup.product === before.product && afterCleanup.ticketType === before.ticketType);

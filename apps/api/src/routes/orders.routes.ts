@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { requireAuth } from '../plugins/auth';
 import { cancelOrder, confirmPaidOrder, createPendingOrder, initiatePayment, quoteCancellation } from '../modules/booking/engine';
+import { isEmailVerified } from '../modules/mail/verification';
 import { AppError, assertFound } from '../utils/errors';
 
 const checkoutSchema = z.object({
@@ -41,6 +42,15 @@ export async function orderRoutes(app: FastifyInstance): Promise<void> {
   app.post('/orders', {}, async (request, reply) => {
     const user = request.user;
     const body = checkoutSchema.parse(request.body);
+
+    // A signed-in shopper must have confirmed their email before an order is
+    // created. Guests are deliberately left alone: anonymous checkout is an
+    // existing capability of this platform, and gating it would remove a real
+    // funnel rather than close a hole. The account gate is the one that pays
+    // off — it is the address a ticket is delivered to.
+    if (user && !(await isEmailVerified(user.id))) {
+      throw AppError.emailNotVerified();
+    }
 
     const result = await createPendingOrder({
       userId: user?.id ?? null,

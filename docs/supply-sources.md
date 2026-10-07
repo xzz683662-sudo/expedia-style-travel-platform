@@ -456,3 +456,62 @@ Account centre: `GET /api/v1/account/overview`, `GET|POST /api/v1/account/paymen
 `PATCH|DELETE /api/v1/account/payment-methods/:id`, `GET /api/v1/account/payment-channels`.
 Support may list, set-default and **remove** a customer's saved method, but never
 add one — a support agent must not be able to introduce a payment credential.
+
+## Inventory feed — actor reliability and the offline path (re-probed 2026-10-07)
+
+`jupri/expedia-hotels` is the wired `APIFY_HOTEL_ACTOR`. It was re-probed live on
+**2026-10-07** because the freshness rule above requires it, and the results are
+quoted verbatim because the difference between them is the whole story:
+
+| probe | input | observed |
+| --- | --- | --- |
+| city search | `{location:["Las Vegas"],limit:3,site:"1",language:"en_US",check_in:"2026-11-15",check_out:"2026-11-18"}` | run **FAILED**, `statusMessage: "error: Too Many Requests"`, exitCode 1, **0 items**, 15.3 s |
+| hotel id | `{location:["ho138881"],limit:1,site:"1",language:"en_US"}` | run **SUCCEEDED** in 5.2 s but **0 items** |
+| dataset read | `GET /v2/datasets/{id}/items` | `[]` — the run genuinely produced no rows |
+
+**Cause.** The actor's default egress is Apify's **shared residential proxy group**,
+which Expedia rate-limits across every user of the actor — not something this repo
+can fix by retrying. This is the same finding as the recorded 12/12 `HTTP 429` and
+the actor's own 30-day success rate of **29/27,214 (0.107%)**. The id probe did not
+429 only because it produced no search traffic; `location` is also not the field
+for a hotel id, and the schema's `example` enum hints the id forms belong to a
+different entry point.
+
+**Fix (operator action, already wired).** The actor exposes `dev_proxy_config`
+(HTTP(S) or SOCKS5; documented only as a URL format, `type: object` with no
+published shape). Supply your own egress and the 429 disappears:
+
+```bash
+APIFY_HOTEL_PROXY_CONFIG='{"useApifyProxy":false,"proxyUrls":["socks5://user:pass@host:9000"]}'
+APIFY_HOTEL_SITE=1          # numeric portal id; "1" is Expedia US, answering in USD
+```
+
+**Offline path — so the pipeline is exercisable without any upstream.**
+`pnpm inventory:fixture` stages a stored sample
+(`apps/api/prisma/fixtures/expedia-hotels.sample.json`) through the *same*
+normaliser and the *same* staging helper the live path uses, labelled
+`fixture:expedia-hotels` so a staged row never claims to have been fetched. It
+writes **only** `ScrapedInventory`, exactly like the live ingest.
+
+Measured on 2026-10-07: `fetched: 6, inserted: 4, skipped: 2` (a row with no `id`
+and a row with no `name` are skipped, never guessed), and the catalogue was
+unchanged at `230 products / 676 ticket types`.
+
+**One step that is easy to miss.** A promoted row lands as `DRAFT` with **no
+inventory** — `promote.ts` deliberately refuses to invent stock from a nightly
+snapshot. Search only lists products with a bookable date, so an operator must
+**seed `InventoryRecord` rows before the promoted product can be found**. Without
+that step the product is indexed yet unfindable, which is the failure the
+integration check now asserts against:
+
+```text
+pnpm --filter @easytrip/api inventory:integration
+  ✓ the promoted product is discoverable in search — engine=postgres total=1
+  ✓ the search hit carries the operator price, not the scraped one — =24900
+```
+
+Full chain, all offline: `pnpm inventory:fixture` (stage) → promote via
+`/admin/inventory-feed` (needs `INVENTORY_FEED_ENABLED=true`) → seed inventory →
+publish → the existing search serves it. `pnpm inventory:contract` and
+`pnpm inventory:integration` carry the assertions; the former is inside
+`pnpm verify`.

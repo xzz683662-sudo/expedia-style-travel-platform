@@ -1,0 +1,65 @@
+[
+  {
+    "id": "10001",
+    "hotelsComId": "hc-10001",
+    "name": "Canal Ring Boutique Hotel",
+    "starRating": 4.5,
+    "latitude": 52.3676,
+    "longitude": 4.8899,
+    "countryCode": "nl",
+    "propertyUrl": "https://www.expedia.com/Amsterdam-Hotels-Canal-Ring.h10001.Hotel-Information",
+    "price": { "amount": 218.5, "currency": "USD" },
+    "city": "Amsterdam",
+    "reviews": [
+      {
+        "reviewer": "Jane Doe",
+        "email": "jane.doe@example.com",
+        "phone": "+31 20 555 0100",
+        "rating": 5,
+        "text": "Perfect location on the canal, staff were excellent.",
+        "date": "2026-09-18"
+      },
+      { "author": "R. Patel", "rating": 4, "title": "Great value", "text": "Small rooms but spotless.", "date": "2026-08-30" }
+    ]
+  },
+  {
+    "id": "10002",
+    "name": "Museum Quarter Design Hotel",
+    "starRating": 4,
+    "geo": { "latitude": 52.358, "longitude": 4.879 },
+    "address": { "countryCode": "NL" },
+    "nightlyPrice": 176.25,
+    "currency": "USD",
+    "city": "Amsterdam",
+    "reviews": [{ "reviewer_name": "Sam Lee", "email": "sam@example.org", "rating": 4, "text": "Close to the museums." }]
+  },
+  {
+    "id": "10003",
+    "name": "Jordaan Houseboat Suites",
+    "starRating": 4.8,
+    "location": { "lat": 52.3761, "lng": 4.8823, "name": "Jordaan" },
+    "price": "199.00",
+    "currency": "USD",
+    "city": "Amsterdam"
+  },
+  {
+    "id": "10004",
+    "name": "Schiphol Airport Transit Inn",
+    "starRating": 3,
+    "latitude": 52.3105,
+    "longitude": 4.7683,
+    "country": "NL",
+    "offers": [{ "amount": 129.99, "currency": "USD" }],
+    "city": "Amsterdam"
+  },
+  {
+    "name": "Row With No Id Is Unusable",
+    "starRating": 5,
+    "price": { "amount": 999, "currency": "USD" }
+  },
+  {
+    "id": "10006",
+    "starRating": 2,
+    "price": { "amount": 45, "currency": "USD" }
+  }
+]

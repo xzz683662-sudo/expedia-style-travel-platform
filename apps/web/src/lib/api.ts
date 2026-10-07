@@ -710,6 +710,35 @@ export type AuditEntry = {
 };
 
 // ---------------------------------------------------------------------------
+// Support chat
+// ---------------------------------------------------------------------------
+
+export type SupportChatMessage = {
+  id: string;
+  conversationId: string;
+  authorType: 'CUSTOMER' | 'AGENT' | 'SYSTEM';
+  authorName: string | null;
+  body: string;
+  createdAt: string;
+  readAt: string | null;
+};
+
+export type SupportChatConversation = {
+  id: string;
+  subject: string;
+  status: 'OPEN' | 'CLOSED';
+  orderId: string | null;
+  assignedToUserId: string | null;
+  customerUnread: number;
+  staffUnread: number;
+  lastMessageAt: string;
+  lastPreview: string | null;
+  createdAt: string;
+  /** Present on the staff inbox view only. */
+  customer?: { id: string; name: string; email: string } | null;
+};
+
+// ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
 
@@ -821,7 +850,14 @@ export const api = {
     locale?: string;
     countryCode?: string;
   }) =>
-    request<{ token: string; user: { id: string; email: string; firstName: string; lastName: string } }>('/auth/register', {
+    request<{
+      token: string;
+      user: { id: string; email: string; firstName: string; lastName: string; emailVerified: boolean };
+      /** `devCode` is only present when the API runs with the console mail
+       * transport outside production, so the end-to-end test can complete the
+       * flow without a mailbox. */
+      emailVerification: { required: boolean; sent: boolean; devCode?: string };
+    }>('/auth/register', {
       method: 'POST',
       body,
     }),
@@ -829,7 +865,14 @@ export const api = {
   login: (body: { email: string; password: string }) =>
     request<{
       token: string;
-      user: { id: string; email: string; firstName: string; lastName: string; loyalty: { tier: string; points: number } | null };
+      user: {
+        id: string;
+        email: string;
+        firstName: string;
+        lastName: string;
+        emailVerified: boolean;
+        loyalty: { tier: string; points: number } | null;
+      };
     }>('/auth/login', { method: 'POST', body }),
 
   me: (token: string) =>
@@ -841,6 +884,7 @@ export const api = {
       phone: string | null;
       locale: string;
       role: string;
+      emailVerified: boolean;
       marketingOptIn: boolean;
       loyalty: {
         tier: string;
@@ -851,6 +895,14 @@ export const api = {
       travelers: { id: string; fullName: string; email: string | null; isDefault: boolean }[];
       stats: { orders: number; reviews: number; wishlist: number };
     }>('/auth/me', { token, cache: 'no-store' }),
+
+  /** Confirms an email address with the 6-digit code from registration. */
+  verifyEmail: (body: { email: string; code: string }) =>
+    request<{ verified: boolean; alreadyVerified: boolean }>('/auth/verify-email', { method: 'POST', body }),
+
+  /** Re-sends a verification code. Always answers `sent: true`. */
+  resendVerification: (body: { email: string }) =>
+    request<{ sent: boolean; devCode?: string }>('/auth/resend-verification', { method: 'POST', body }),
 
   // --- Account centre ---
   // Saved methods are references only: the API returns a brand + last four and
@@ -1285,6 +1337,62 @@ export const api = {
 
   supportAudit: (params: SearchParams, token: string) =>
     request<{ items: AuditEntry[] }>(`/support/audit${toQuery(params)}`, { token, cache: 'no-store' }),
+
+  // --- Support chat: shopper side ---
+  openChat: (body: { subject?: string; orderId?: string; message?: string }, token: string) =>
+    request<SupportChatConversation>('/support/conversations', { method: 'POST', body, token }),
+
+  myChats: (token: string) =>
+    request<{ items: SupportChatConversation[]; unread: number }>('/support/conversations/mine', {
+      token,
+      cache: 'no-store',
+    }),
+
+  chatThread: (id: string, token: string) =>
+    request<{ conversation: SupportChatConversation; messages: SupportChatMessage[]; unread: number }>(
+      `/support/conversations/${encodeURIComponent(id)}`,
+      { token, cache: 'no-store' },
+    ),
+
+  sendChatMessage: (id: string, body: string, token: string) =>
+    request<SupportChatMessage>(`/support/conversations/${encodeURIComponent(id)}/messages`, {
+      method: 'POST',
+      body: { body },
+      token,
+    }),
+
+  // --- Support chat: staff side ---
+  supportInbox: (params: SearchParams, token: string) =>
+    request<{ items: SupportChatConversation[]; unread: number }>(`/support/inbox${toQuery(params)}`, {
+      token,
+      cache: 'no-store',
+    }),
+
+  supportConversation: (id: string, token: string) =>
+    request<{ conversation: SupportChatConversation; messages: SupportChatMessage[]; unread: number }>(
+      `/support/inbox/${encodeURIComponent(id)}`,
+      { token, cache: 'no-store' },
+    ),
+
+  supportReply: (id: string, body: string, token: string) =>
+    request<SupportChatMessage>(`/support/inbox/${encodeURIComponent(id)}/messages`, {
+      method: 'POST',
+      body: { body },
+      token,
+    }),
+
+  supportAssign: (id: string, token: string, assignedToUserId?: string | null) =>
+    request<SupportChatConversation>(`/support/inbox/${encodeURIComponent(id)}/assign`, {
+      method: 'POST',
+      body: { assignedToUserId },
+      token,
+    }),
+
+  supportCloseConversation: (id: string, token: string) =>
+    request<SupportChatConversation>(`/support/inbox/${encodeURIComponent(id)}/close`, { method: 'POST', token }),
+
+  supportReopenConversation: (id: string, token: string) =>
+    request<SupportChatConversation>(`/support/inbox/${encodeURIComponent(id)}/reopen`, { method: 'POST', token }),
 };
 
 export { API_BASE };

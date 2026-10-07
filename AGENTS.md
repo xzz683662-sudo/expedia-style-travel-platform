@@ -84,4 +84,5 @@ pnpm audit:schema # flags columns written but never read
 | `.github/skills/repo-playbook/SKILL.md` | Project facts, verified commands, pitfalls — load first |
 | `.github/skills/verify-the-change/SKILL.md` | Verification workflow for any change |
 | `.github/skills/live-supply-source/SKILL.md` | Onboarding a live rate source (trvl, Kiwi, partner feed) |
+| `.github/skills/apify-toolkit/SKILL.md` | Router for the 28 globally installed Apify skills — pick the right one before scraping |
 | `.github/agents/easytrip-verifier.agent.md` | Implement + prove a change against the real gates |

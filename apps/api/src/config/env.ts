@@ -309,6 +309,38 @@ export const config = {
     expiresIn: str('JWT_EXPIRES_IN', '7d'),
   },
 
+  /**
+   * Outbound email — currently only the address-verification code.
+   *
+   * Zero-key by default. `console` writes the message to the API log, which is
+   * enough for local development and for the end-to-end test to read the code
+   * back without a mailbox. Production switches `MAIL_TRANSPORT=resend` and
+   * supplies `RESEND_API_KEY`.
+   *
+   * SMTP is intentionally *not* built in: it needs a dependency, and this
+   * repository ships no mail library. Adding one for a path nothing uses yet
+   * would be cargo culting; the transport interface is the extension point.
+   */
+  mail: {
+    transport: str('MAIL_TRANSPORT', 'console'),
+    fromAddress: str('MAIL_FROM', 'EasyTrip <no-reply@easytrip.test>'),
+    resendApiKey: str('RESEND_API_KEY'),
+    resendBaseUrl: str('RESEND_BASE_URL', 'https://api.resend.com'),
+    /** How long a verification code stays valid. */
+    codeTtlMinutes: int('MAIL_CODE_TTL_MINUTES', 15),
+    /** Wrong guesses allowed before a code is dead. Caps brute-force online. */
+    maxAttempts: int('MAIL_CODE_MAX_ATTEMPTS', 5),
+    /** Minimum gap between resend requests for one account. */
+    resendCooldownSeconds: int('MAIL_RESEND_COOLDOWN_SECONDS', 45),
+    /**
+     * Return the code in the API response so an automated test can complete the
+     * flow without reading a mailbox. Forced off in production regardless of
+     * the transport, so this can never leak a code from a real deployment.
+     */
+    exposeDevCode:
+      str('MAIL_TRANSPORT', 'console') === 'console' && str('NODE_ENV', 'development') !== 'production',
+  },
+
   site: {
     url: str('NEXT_PUBLIC_SITE_URL', 'http://localhost:3000'),
     // Simplified Chinese first because the storefront ships an en/zh switcher;

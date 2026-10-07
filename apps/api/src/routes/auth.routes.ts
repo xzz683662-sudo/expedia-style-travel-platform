@@ -1,11 +1,13 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { config } from '../config/env';
+import { logger } from '../lib/logger';
 import { prisma } from '../lib/prisma';
 import { requireAuth } from '../plugins/auth';
 import { AppError } from '../utils/errors';
 import { hashPassword, verifyPassword } from '../utils/crypto';
 import { signToken } from '../utils/jwt';
+import { sendVerificationEmail, verifyEmailCode } from '../modules/mail/verification';
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -22,6 +24,18 @@ const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(1),
 });
+
+const verifyEmailSchema = z.object({
+  email: z.string().email(),
+  // Six digits, exactly. Validated before any lookup so a malformed code never
+  // reaches the hash comparison.
+  code: z
+    .string()
+    .trim()
+    .regex(/^\d{6}$/, 'Enter the 6-digit code from your email'),
+});
+
+const resendSchema = z.object({ email: z.string().email() });
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
   app.post('/auth/register', {}, async (request, reply) => {
@@ -59,6 +73,27 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     const token = signToken({ sub: user.id, email: user.email, role: user.role, locale: user.locale });
 
+    // Registration succeeds whether or not the email goes out: the account is
+    // already durable, and a transport failure must not lose it. The shopper can
+    // resend from the verification screen.
+    let devCode: string | undefined;
+    let sent = false;
+    try {
+      const issued = await sendVerificationEmail({
+        userId: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        locale: user.locale,
+      });
+      sent = true;
+      if (config.mail.exposeDevCode) devCode = issued.code;
+    } catch (error) {
+      logger.warn('auth.verification_send_failed', {
+        userId: user.id,
+        reason: (error as Error).message,
+      });
+    }
+
     return reply.status(201).send({
       token,
       user: {
@@ -68,7 +103,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         lastName: user.lastName,
         locale: user.locale,
         role: user.role,
+        emailVerified: false,
       },
+      emailVerification: { required: true, sent, devCode },
     });
   });
 
@@ -96,6 +133,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         lastName: user.lastName,
         locale: user.locale,
         role: user.role,
+        emailVerified: user.emailVerifiedAt !== null,
         loyalty: user.loyaltyAccount
           ? { tier: user.loyaltyAccount.tier, points: user.loyaltyAccount.points }
           : null,
@@ -125,6 +163,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       phone: profile.phone,
       locale: profile.locale,
       role: profile.role,
+      emailVerified: profile.emailVerifiedAt !== null,
       marketingOptIn: profile.marketingOptIn,
       loyalty: profile.loyaltyAccount
         ? {
@@ -208,5 +247,82 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     });
 
     return reply.status(201).send(traveler);
+  });
+
+  /**
+   * Confirms an email address with the code issued at registration.
+   *
+   * Every failure mode collapses into one 422 message on purpose: telling the
+   * caller whether an address exists, or whether a code was expired versus
+   * simply wrong, helps an attacker and not the shopper. The `code` is the same
+   * for all of them; the machine-readable `code` field stays VALIDATION_FAILED.
+   */
+  app.post('/auth/verify-email', {}, async (request) => {
+    const body = verifyEmailSchema.parse(request.body);
+    const email = body.email.toLowerCase();
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) throw AppError.validation('That code is not valid or has expired');
+
+    if (user.emailVerifiedAt) {
+      return { verified: true, alreadyVerified: true as const };
+    }
+
+    const outcome = await verifyEmailCode(user.id, body.code);
+    if (outcome.status !== 'ok') {
+      logger.info('auth.verify_email_rejected', { userId: user.id, reason: outcome.status });
+      throw AppError.validation('That code is not valid or has expired');
+    }
+
+    return { verified: true, alreadyVerified: false as const };
+  });
+
+  /**
+   * Re-issues a verification code.
+   *
+   * Always answers `{ sent: true }`, even for an unknown address: a different
+   * response for a registered email would turn this endpoint into an account
+   * oracle. The cooldown limits how often a code can be minted for one account.
+   */
+  app.post('/auth/resend-verification', {}, async (request) => {
+    const body = resendSchema.parse(request.body);
+    const email = body.email.toLowerCase();
+
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || user.emailVerifiedAt) {
+      return { sent: true, devCode: undefined };
+    }
+
+    const newest = await prisma.emailVerificationCode.findFirst({
+      where: { userId: user.id },
+      orderBy: { createdAt: 'desc' },
+      select: { createdAt: true },
+    });
+    const cooldownMs = config.mail.resendCooldownSeconds * 1000;
+    if (newest && Date.now() - newest.createdAt.getTime() < cooldownMs) {
+      const retryAfterSeconds = Math.ceil((cooldownMs - (Date.now() - newest.createdAt.getTime())) / 1000);
+      throw new AppError(429, 'RATE_LIMITED', 'Please wait before requesting another code', {
+        retryAfterSeconds,
+      });
+    }
+
+    let devCode: string | undefined;
+    try {
+      const issued = await sendVerificationEmail({
+        userId: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        locale: user.locale,
+      });
+      if (config.mail.exposeDevCode) devCode = issued.code;
+    } catch (error) {
+      logger.warn('auth.verification_resend_failed', {
+        userId: user.id,
+        reason: (error as Error).message,
+      });
+      throw new AppError(502, 'INTERNAL', 'Could not send the verification email, please try again');
+    }
+
+    return { sent: true, devCode };
   });
 }

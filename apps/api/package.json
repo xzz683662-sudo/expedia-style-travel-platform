@@ -20,6 +20,7 @@
     "supply:contract": "tsx prisma/live-contract-check.ts",
     "inventory:contract": "tsx prisma/inventory-feed-check.ts",
     "inventory:integration": "tsx prisma/inventory-feed-integration.ts",
+    "inventory:fixture": "tsx prisma/inventory-feed-fixture.ts",
     "inventory:index": "tsx prisma/inventory-feed-index-check.ts",
     "credentials:contract": "tsx prisma/credentials-check.ts",
     "account:integration": "tsx prisma/account-integration.ts",

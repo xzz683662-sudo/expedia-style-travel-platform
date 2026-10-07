@@ -170,7 +170,7 @@ export async function ticketingRoutes(app: FastifyInstance): Promise<void> {
   // -------------------------------------------------------------------------
   // Gate / operator endpoints (staff auth)
   // -------------------------------------------------------------------------
-  app.post('/scan/verify', { preHandler: [requireRole('OPERATOR', 'ADMIN', 'MERCHANT')] }, async (request) => {
+  app.post('/scan/verify', { preHandler: [requireRole('ADMIN')] }, async (request) => {
     const body = z
       .object({
         code: z.string().min(4, 'Scan a QR or type the ticket number'),
@@ -268,7 +268,7 @@ export async function ticketingRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /** A dedicated redemption endpoint for hardware scanners. */
-  app.post('/scan/redeem', { preHandler: [requireRole('OPERATOR', 'ADMIN', 'MERCHANT')] }, async (request) => {
+  app.post('/scan/redeem', { preHandler: [requireRole('ADMIN')] }, async (request) => {
     const body = z
       .object({ code: z.string().min(4), gate: z.string().max(120).optional(), deviceId: z.string().max(120).optional() })
       .parse(request.body);
@@ -282,7 +282,7 @@ export async function ticketingRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /** Today's admissions for a gate/operator dashboard. */
-  app.get('/scan/stats', { preHandler: [requireRole('OPERATOR', 'ADMIN')] }, async (request) => {
+  app.get('/scan/stats', { preHandler: [requireRole('ADMIN')] }, async (request) => {
     const query = z.object({ gate: z.string().max(120).optional() }).parse(request.query);
     const today = toServiceDate(new Date());
     const dayStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));

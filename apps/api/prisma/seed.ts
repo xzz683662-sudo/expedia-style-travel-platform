@@ -588,18 +588,29 @@ async function ensureCustomer() {
       role: UserRole.CUSTOMER,
       locale: 'en-US',
       countryCode: 'US',
+      // Demo accounts skip the email-verification step: the code lives in the
+      // API log (MAIL_TRANSPORT=console), which is fine for a human but would
+      // make every seeded order depend on reading that log. Verification is
+      // exercised end to end on a freshly registered account instead.
+      emailVerifiedAt: new Date(),
       loyaltyAccount: { create: { tier: LoyaltyTier.GOLD, points: 18_400, lifetimePoints: 21_200 } },
       travelerProfiles: { create: { fullName: 'Alex Traveler', email, isDefault: true } },
     },
-    update: {},
+    update: { emailVerifiedAt: new Date() },
   });
 }
 
+/**
+ * The platform has exactly two staff surfaces, so it has exactly two staff logins.
+ *
+ * `operator@` and `merchant@` used to exist alongside these; their capabilities
+ * (gate scanning, partner views) are ADMIN capabilities now. Those accounts are
+ * retired below rather than left behind, because a demo credential that no longer
+ * maps to a role is worse than no credential at all.
+ */
 async function ensureStaff() {
   const staff = [
     { email: 'admin@easytrip.test', role: UserRole.ADMIN, firstName: 'Ops', lastName: 'Admin' },
-    { email: 'operator@easytrip.test', role: UserRole.OPERATOR, firstName: 'Gate', lastName: 'Staff' },
-    { email: 'merchant@easytrip.test', role: UserRole.MERCHANT, firstName: 'Partner', lastName: 'Manager' },
     // SUPPORT sits below ADMIN: able to fix a customer's record and issue a
     // goodwill refund, unable to touch pricing or simulate payments.
     { email: 'support@easytrip.test', role: UserRole.SUPPORT, firstName: 'Casey', lastName: 'Support' },
@@ -614,17 +625,31 @@ async function ensureStaff() {
         firstName: person.firstName,
         lastName: person.lastName,
         role: person.role,
+        emailVerifiedAt: new Date(),
         loyaltyAccount: { create: { tier: LoyaltyTier.MEMBER } },
       },
-      update: { role: person.role },
+      update: { role: person.role, emailVerifiedAt: new Date() },
     });
   }
 
-  // Attach the merchant login to the first partner merchant.
-  const merchantUser = await prisma.user.findUnique({ where: { email: 'merchant@easytrip.test' } });
+  // Retire the two dissolved roles. Best-effort: a database whose demo accounts
+  // have picked up orders must not fail the whole seed because a delete is
+  // restricted — the rows are reassigned by `migrate:roles` either way.
+  try {
+    const retired = await prisma.user.deleteMany({
+      where: { email: { in: ['operator@easytrip.test', 'merchant@easytrip.test'] } },
+    });
+    if (retired.count > 0) logger.info('seed.staff_retired', { count: retired.count });
+  } catch (error) {
+    logger.warn('seed.staff_retire_skipped', { reason: (error as Error).message });
+  }
+
+  // The partner merchant still needs an owner so the demo catalogue has a
+  // provenance chain; the admin holds it now that there is no merchant login.
+  const adminUser = await prisma.user.findUnique({ where: { email: 'admin@easytrip.test' } });
   const partner = await prisma.merchant.findFirst({ where: { slug: 'big-apple-attractions' } });
-  if (merchantUser && partner && !partner.ownerUserId) {
-    await prisma.merchant.update({ where: { id: partner.id }, data: { ownerUserId: merchantUser.id } });
+  if (adminUser && partner && !partner.ownerUserId) {
+    await prisma.merchant.update({ where: { id: partner.id }, data: { ownerUserId: adminUser.id } });
   }
 }
 

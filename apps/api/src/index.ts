@@ -17,6 +17,7 @@ import { registerErrorHandler } from './plugins/error-handler';
 import { adminRoutes } from './routes/admin.routes';
 import { authRoutes } from './routes/auth.routes';
 import { cartRoutes } from './routes/cart.routes';
+import { chatRoutes } from './routes/chat.routes';
 import { accountRoutes } from './routes/account.routes';
 import { inventoryFeedRoutes } from './routes/inventory-feed.routes';
 import { itineraryRoutes, loyaltyRoutes } from './routes/loyalty.routes';
@@ -166,6 +167,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(inventoryFeedRoutes, { prefix: '/api/v1' });
   await app.register(promoRoutes, { prefix: '/api/v1' });
   await app.register(supportRoutes, { prefix: '/api/v1' });
+  await app.register(chatRoutes, { prefix: '/api/v1' });
   await app.register(notificationRoutes, { prefix: '/api/v1' });
   await app.register(realtimeRoutes, { prefix: '/api/v1' });
 

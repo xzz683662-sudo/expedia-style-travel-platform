@@ -25,6 +25,7 @@
     "supply:probe": "pnpm --filter @easytrip/api supply:probe",
     "supply:contract": "pnpm --filter @easytrip/api supply:contract",
     "inventory:contract": "pnpm --filter @easytrip/api inventory:contract",
+    "inventory:fixture": "pnpm --filter @easytrip/api inventory:fixture",
     "credentials:contract": "pnpm --filter @easytrip/api credentials:contract",
     "smoke": "bash scripts/smoke-test.sh",
     "audit:schema": "bash scripts/schema-audit.sh",
@@ -35,6 +36,7 @@
     "db:indexes": "pnpm --filter @easytrip/api db:indexes"
   },
   "devDependencies": {
+    "@playwright/test": "^1.45.3",
     "typescript": "^5.6.3"
   }
 }
