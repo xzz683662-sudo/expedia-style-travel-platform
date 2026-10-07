@@ -24,11 +24,14 @@
     "supply:import": "pnpm --filter @easytrip/api supply:import",
     "supply:probe": "pnpm --filter @easytrip/api supply:probe",
     "supply:contract": "pnpm --filter @easytrip/api supply:contract",
+    "inventory:contract": "pnpm --filter @easytrip/api inventory:contract",
+    "credentials:contract": "pnpm --filter @easytrip/api credentials:contract",
     "smoke": "bash scripts/smoke-test.sh",
     "audit:schema": "bash scripts/schema-audit.sh",
     "test:realtime": "node scripts/realtime-test.mjs",
+    "test:feed": "node scripts/feed-test.mjs",
     "check:mobile": "bash scripts/mobile-check.sh",
-    "verify": "pnpm typecheck && pnpm audit:schema && pnpm supply:contract && pnpm smoke && pnpm test:realtime && pnpm check:mobile",
+    "verify": "pnpm typecheck && pnpm audit:schema && pnpm supply:contract && pnpm inventory:contract && pnpm credentials:contract && pnpm smoke && pnpm test:realtime && pnpm check:mobile",
     "db:indexes": "pnpm --filter @easytrip/api db:indexes"
   },
   "devDependencies": {

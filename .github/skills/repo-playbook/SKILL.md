@@ -261,6 +261,72 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
 - `new Date(8_000_000_000_000_000)` exceeds the JS Date range (±8.64e15) → `Invalid Date` → `NaN`
   poisons a `reduce` seed value.
 
+### Inventory feed (Apify Expedia Hotels — staged, never sold)
+
+- **Positioning is option A: first-party.** Scrape → an operator promotes a row by hand into a
+  real `Product` priced from *our* cost basis. The README's first-party scope note stands; see
+  `docs/adr/0001-inventory-feed-positioning.md`. Do not change it without re-reading the ADR.
+- **Blast radius, enforced rather than documented.** `modules/inventory-feed/scraper.ts` writes
+  only `ScrapedInventory`. Nothing that reads `Product` may read `ScrapedInventory`, and the
+  ingest module must not import `pricing/`, `inventory/` or `booking/`. `pnpm inventory:contract`
+  asserts all of this offline and is wired into `pnpm verify`. It strips comments before the
+  identifier checks — the rule is explained *inside the file it guards*, so a comment-blind
+  grep would fire on the documentation of the rule itself.
+- **A scraped price never becomes a sellable price.** `promoteScrapedRow` writes `costCents`
+  (typed by a person) and `basePriceCents` from the request, never from the scrape; both the
+  scraped and the chosen figures land in `AuditLog`. `computeQuote` stays the only pricing path.
+- **`ScrapedInventory.raw` is the backup.** The untouched, PII-stripped payload is stored so a
+  feed schema change is a mapping edit plus a backfill from `raw`, never a paid re-scrape. The
+  field mapping in `scraper.ts` is tolerant on purpose while a live calibration is pending.
+- **`externalId` is `String @default("")`, not nullable.** Prisma cannot put a nullable field in
+  a `@@unique`; `""` means "the feed gave none", and those rows are skipped before insert.
+- **The actor fails often and costs money.** Measured 30-day stats (2026-10-06): **29 succeeded
+  of 27,214 runs (0.107%)**, and it needs `FULL_PERMISSIONS` (a run 403s until approved in the
+  console). An empty dataset is a normal outcome — `ingestApifyHotels` returns `fetched: 0` and
+  never throws on it. `maxRowsPerRun` caps a batch and the planned count is logged *before* the
+  run starts.
+- **No scheduler.** Runs are manual (`POST /admin/inventory-feed/scrape`) on purpose: a bad first
+  run on a timer is a bad run every night. `POST /admin/inventory-feed/refresh-stale` is the
+  explicit daily action instead of a tick on the 60 s sweeper.
+- Routes 404 while `INVENTORY_FEED_ENABLED=false` — the flag *is* the rollback.
+- **The index layer reads the staging table directly.** `ScrapedInventory.name` /
+  `"citySlug"` carry trigram indexes in `prisma/indexes.sql`, so the admin search
+  (`GET /admin/inventory-feed?q=`) resolves through the same `ILIKE`-backed plan as
+  `SearchDocument` — no second store, no reindex. The column is `"citySlug"`, **not**
+  `city_slug`: Prisma uses the field name verbatim and this schema has no `@map`.
+  `SET LOCAL` outside a transaction is a no-op, so proving an index is used means
+  running `SET` and `EXPLAIN` in one interactive transaction (`pnpm inventory:index`).
+- **The actor is rate-limited to near-uselessness.** A live hunt measured **12/12
+  `HTTP 429`** (Expedia throttling the actor's residential proxy), matching its own
+  0.107% success rate. A single query is expected to fail, so population happens
+  through `ingestCityBatch` (retries per city, reports `perCity`) — never a loop of
+  one-shot calls. Billing is per platform usage, **not per row** ($0.0006 for 12 runs).
+
+### Credentials: data-access vs transaction (never conflate)
+
+- **Two different powers, audited separately.** `modules/supply/credentials.ts` classifies
+  every source as `PUBLIC | API_KEY | SUPPLIER | BOOKING | SETTLEMENT`. The last two are
+  *transaction* credentials. Reading a price is not permission to sell at it.
+- **The stage boundary is a value, not a paragraph.** `STAGE_BOUNDARY` admits only
+  `PUBLIC`/`API_KEY`/`SUPPLIER` for **read** use; `pnpm credentials:contract` (in `pnpm verify`)
+  asserts **no enabled source can book or settle**, and that every transaction-capable source
+  is marked unavailable — so "documented it" never drifts into "turned it on".
+- **`available` is the line.** A source that is classed `BOOKING` but `available: false`
+  (e.g. `cruise`) is *aspirational*: the class records what a real integration would need,
+  which is not the same as having it.
+- **Settlement rails refuse `live`; they do not merely lack config.** PayPal and TRC20
+  adapters return `live_rail_out_of_scope` — a louder, more honest failure than an adapter
+  that pretends to settle. Both are sandbox-only and selected per channel via
+  `getGatewayForChannel()`.
+- **Never store a card secret.** `PaymentMethod` holds a gateway token, a brand and the last
+  four digits — no PAN, no expiry, no CVC. There is no such column and no such API field, and
+  `pnpm credentials:contract` greps for both. TRC20 addresses are **base58check-validated**
+  (double-SHA256), because an on-chain transfer is irreversible and a typo is a loss.
+- **Account centre** (`/api/v1/account/*`, web `/account`): overview, saved methods CRUD,
+  and a `payment-channels` endpoint that states each rail's `liveSettlement: false` as data.
+  Support may list, set-default and **remove** a customer's method but never **add** one — an
+  agent must not be able to introduce a payment credential.
+
 ## Conventions
 
 - Money goes through `apps/api/src/utils/money.ts`; IDs through `utils/ids.ts`; encryption via
@@ -269,7 +335,7 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
 - Auth/role gates are added in `apps/api/src/plugins/auth.ts` — check it before adding a new protected route.
 - Prisma client singleton: `apps/api/src/lib/prisma.ts`. Env schema: `apps/api/src/config/env.ts`.
 - Verify changes with `scripts/smoke-test.sh` (and `realtime-test.mjs` for the realtime module).
-  `pnpm verify` runs typecheck → audit:schema → supply:contract → smoke → realtime → mobile in one shot and must exit **0**.
+  `pnpm verify` runs typecheck → audit:schema → supply:contract → inventory:contract → credentials:contract → smoke → realtime → mobile in one shot and must exit **0**.
   Baselines re-verified 2026-10-04: typecheck clean on both packages, `audit:schema` reports
   "No dead columns found" (70 models / 542 scalar columns), smoke **92/92**, realtime **18/18**,
   mobile **40/40**.

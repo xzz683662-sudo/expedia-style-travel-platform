@@ -3,5 +3,11 @@
         "leizongmin.node-module-intellisense",
         "ms-vscode.azure-repos",
         "donjayamanne.githistory"
+    ],
+    // This repo's only `.sql` is PostgreSQL (Prisma native types). The MSSQL
+    // extension lints it with a T-SQL parser and flags valid PG syntax, so it is
+    // not recommended here. `mssql.*` in settings.json silences it if installed.
+    "unwantedRecommendations": [
+        "ms-mssql.mssql"
     ]
 }

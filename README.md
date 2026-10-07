@@ -36,6 +36,23 @@ hold → pay → issue → scan → redeem → cancel → refund—and exercises
 checkout, wishlist management, and adding confirmed bookings to trip plans. Run
 `bash scripts/smoke-test.sh` to verify it against the configured development database.
 
+> **Inventory feed (opt-in, off by default).** A staging-only importer can pull third-party
+> hotel rows from an Apify actor into `ScrapedInventory`. Nothing there is sellable: an operator
+> must promote a row by hand into a first-party product, priced from our own cost basis. The
+> feature is flag-gated off (`INVENTORY_FEED_ENABLED=false`), so the first-party scope above is
+> unchanged — see [`docs/adr/0001-inventory-feed-positioning.md`](./docs/adr/0001-inventory-feed-positioning.md).
+> `pnpm inventory:contract` enforces, offline, that the ingest path cannot touch anything the
+> booking engine prices from.
+>
+> **Credentials: data access ≠ transaction.** Every supply source is classified in
+> `apps/api/src/modules/supply/credentials.ts` as `PUBLIC` / `API_KEY` / `SUPPLIER` /
+> `BOOKING` / `SETTLEMENT`, and the last two are *transaction* credentials. This stage is
+> bounded to **read-only supply** — `pnpm credentials:contract` asserts that no enabled source
+> can book or settle. The account centre (`/account`) stores payment methods as **references
+> only** (a gateway token + brand + last four; never a card number), and the PayPal and TRC20
+> rails are **sandbox-only** and refuse `live` outright. See
+> [`docs/supply-sources.md`](./docs/supply-sources.md#credential-classification).
+
 ---
 
 ## Quickstart

@@ -315,3 +315,144 @@ and the pricing/inventory engines derive them.
 
 `apps/api/src/modules/supply/source.ts` defines `SupplySource`. One adapter per row
 above. `booking/*` never imports it.
+
+## Inventory feed (batch scrape — Apify Expedia Hotels)
+
+A fourth kind of source, and the only one that is **staged rather than sold**:
+`jupri/expedia-hotels` returns real hotel rows, and they land in
+`ScrapedInventory` where nothing is sellable until an operator promotes it by
+hand (positioning option A — see `docs/adr/0001-inventory-feed-positioning.md`).
+The dividing line still holds: the scraped **price** is stored as evidence and
+never becomes a `TicketType.basePriceCents`.
+
+Probed live on **2026-10-06** with a real token, per the freshness rule.
+
+| finding | evidence |
+| --- | --- |
+| answers at all? | yes, once permitted — `POST /v2/acts/jupri~expedia-hotels/runs` |
+| credentialed? | **token required**, owner-supplied (`APIFY_TOKEN`) |
+| permission gate | `403 {"error":{"type":"full-permission-actor-not-approved", …}}` until the actor is approved in the console. Actor reports `actorPermissionLevel: FULL_PERMISSIONS` |
+| input shape | `site` must be a **numeric portal id** (`"1"`, `"4"`, `"8"`, `"20"`, …), not a hostname: `Field input.site must be equal to one of the allowed values: "1", "3", …`. `location` is an array; `limit` is per query |
+| **reliability** | the actor's own 30-day stats: `SUCCEEDED 29 / TOTAL 27214` = **0.107%** |
+| **what a call costs** | billed per platform usage (residential proxy traffic), **not per row**. A 12-attempt hunt cost **$0.00060** total |
+| failure mode | `☢️ Proxy: <…RESIDENTIAL…> (REQUIRED)` then `❌ HTTP Error 429: Too Many Requests` — Expedia rate-limits the actor's **shared residential proxy group**. Measured **12/12 failed**, then **4/4 failed again** on a re-probe of the actor's own documented example input (`{"location":["Bali"],"limit":5}`) |
+| currency | the Expedia US portal (`site: "1"`) answers **USD**, which matches settlement |
+
+### Input schema (from the actor's published schema, cross-checked with probes)
+
+| input | notes |
+| --- | --- |
+| `location` | **array**. Accepts a place name (`"Bali"`), `"region:<id>"`, coordinates (`"36.778259,-119.417931"`), or space-separated Expedia/Hotels.com hotel ids |
+| `limit` | results **per query** |
+| `check_in` / `check_out` | `YYYY-MM-DD` |
+| `site` | **region + currency**, as a numeric portal id (`"1"` = Expedia US/USD). Validated upstream; a hostname is rejected |
+| `language` | locale, e.g. `en_US` |
+| `includes:*` | extra blocks: `description`, `policies`, `amenities`, `gallery`, `faq`, `location`, `landmarks`, `offers` (room prices), `calendar`, `availability` (integer = months ahead), `review`, `review_count`. Each costs upstream traffic |
+| `dev_proxy_config` | **the escape hatch** — an HTTP(S)/SOCKS5 proxy object. Supplying your own egress is the only documented way around the `429` above |
+
+Wired accordingly: `APIFY_HOTEL_SITE`, `APIFY_HOTEL_LANGUAGE`, `APIFY_HOTEL_INCLUDES`,
+and `APIFY_HOTEL_PROXY_CONFIG` (a JSON passthrough — the exact object shape is not
+documented, so this code does not guess it).
+
+Raw log lines from the failed hunt (verbatim):
+
+```text
+☢️ Proxy: <http://groups-RESIDENTIAL@10.0.93.255> (REQUIRED)
+❌ HTTP Error 429: Too Many Requests
+```
+
+Consequences encoded in the adapter:
+
+- **An empty or failed batch is a normal outcome, not an error.**
+  `ingestApifyHotels` returns `fetched: 0` and never throws on an empty dataset.
+- **`ingestCityBatch` retries each city** and reports `perCity`, because one
+  request in a thousand is not a viable population strategy.
+- **The scraped `priceCents` is evidence.** Never read by `computeQuote`;
+  `promoteScrapedRow` requires an operator-typed `costCents`.
+- **PII is stripped on the way in.** Reviewer identity never reaches `raw`.
+
+Because the feed is unreliable, this is an **operator-populated** staging table
+(`INVENTORY_FEED_ENABLED=false` by default; the routes 404 while off), not a
+production supply channel. The index layer reads `ScrapedInventory` directly
+(trigram indexes in `prisma/indexes.sql`), so any row that does land is
+searchable with no separate pipeline.
+
+## Credential classification
+
+> 实时数据方案必须同时审计"数据获取凭证"和"交易凭证"，两者不能混为一谈。
+>
+> A live-data plan must audit **data-access** credentials and **transaction**
+> credentials separately; the two must never be conflated.
+
+Reading a price and being able to sell at it are different powers, held under
+different contracts. Treating "we have an API key" as "we can take money" is how
+a platform ends up promising a booking it cannot fulfil. Every source is
+therefore classified by **what its credential authorises**, weakest first:
+
+| class | authorises | transacts? |
+| --- | --- | --- |
+| `PUBLIC` | nothing — the bytes are open to anyone | no |
+| `API_KEY` | identifies a caller **for data access**. No commercial right over the data | no |
+| `SUPPLIER` | a supplier relationship returning **real** inventory/prices — still a *read* power | no |
+| `BOOKING` | authority to create a **real reservation upstream** (a write against someone else's inventory) | **yes** |
+| `SETTLEMENT` | authority to **move real money** (charge, capture, refund, payout) | **yes** |
+
+The registry is code, not prose: `apps/api/src/modules/supply/credentials.ts`.
+`pnpm credentials:contract` (inside `pnpm verify`) asserts every claim below.
+
+### Per-source audit (2026-10-06)
+
+| source | domain | class | enabled | can book | can settle |
+| --- | --- | --- | --- | --- | --- |
+| `ourairports` | content | `PUBLIC` | ✅ | – | – |
+| `wikipedia-content` | content | `PUBLIC` | ✅ | – | – |
+| `overture-places`, `osm-pois` | content | `PUBLIC` | – | – | – |
+| `adsb-lol`, `opensky-network` | position | `PUBLIC` | ✅ | – | – |
+| `trvl` | flight | `PUBLIC` | – | – | – |
+| `kiwi.tequila` | flight | `API_KEY` | – | – | – |
+| `serpapi` | flight | `API_KEY` | – | – | – |
+| `amadeus` | flight | `API_KEY` + `SUPPLIER` | – | – | – |
+| `apify.expedia-hotels` | hotel | `API_KEY` + `SUPPLIER` | ✅ | – | – |
+| `cruise` | cruise | `SUPPLIER` + `BOOKING` | – | – | – |
+| `hyperswitch` | payment | `SETTLEMENT` | – | – | ✅ |
+| `paypal` | payment | `SETTLEMENT` | – | – | ✅ |
+| `crypto-trc20` | payment | `SETTLEMENT` | – | – | ✅ |
+
+"enabled" is `available`: the credential is present and usable **for a read** in
+the current deployment. It is the line between *"we documented it"* and *"we
+turned it on"*. The three settlement rails are classed `SETTLEMENT` and all three
+are **disabled** — the audit lists them precisely because a real integration
+would need them, which is not the same as having them.
+
+### Stage transaction boundary
+
+> 本项目可以使用：公开实时数据 · 第三方实时数据 API · 用于读取实时价格/库存的供应商 API Credential
+
+This stage is bounded to **read-only supply**:
+
+- **Permitted:** `PUBLIC`, `API_KEY`, and a `SUPPLIER` credential used to
+  **read** live price/inventory.
+- **Not permitted:** `BOOKING` and `SETTLEMENT`. No real reservation is created
+  upstream and no real money moves.
+
+The boundary is a value (`STAGE_BOUNDARY`), not a paragraph, so the contract gate
+can enforce it: **no source with an enabled credential may book or settle**, and
+the settlement adapters **refuse `live`** rather than merely lacking config.
+
+### Payment rails added this stage (modelled, sandbox-only)
+
+`CARD`, `PAYPAL` and `CRYPTO_TRC20` are modelled as account-saveable methods, and
+`PaymentMethod` stores **only a gateway token, a brand and the last four digits** —
+never a PAN, expiry or CVC. That rule is enforced: the Prisma model has no such
+columns and the API schema has no such field.
+
+Because the boundary admits no live settlement credential, the PayPal and TRC20
+adapters ship **sandbox-only** and refuse `live` outright (`live_rail_out_of_scope`)
+— a refusal is louder and more honest than an adapter that silently pretends to
+have settled. TRC20 additionally checksum-validates Tron addresses (base58check),
+because an on-chain transfer is irreversible and a typo is a loss.
+
+Account centre: `GET /api/v1/account/overview`, `GET|POST /api/v1/account/payment-methods`,
+`PATCH|DELETE /api/v1/account/payment-methods/:id`, `GET /api/v1/account/payment-channels`.
+Support may list, set-default and **remove** a customer's saved method, but never
+add one — a support agent must not be able to introduce a payment credential.

@@ -73,6 +73,7 @@ model User {
   travelerProfiles TravelerProfile[]
   sessions         UserSession[]
   walletLedger     WalletTransaction[]
+  paymentMethods   PaymentMethod[]
 
   @@index([role])
 }
@@ -106,6 +107,64 @@ model TravelerProfile {
   orderTravelers OrderTraveler[]
 
   @@index([userId])
+}
+
+/// What a stored payment credential authorises.
+///
+/// Mirrors `CredentialKind` in `modules/supply/credentials.ts` so the audit is
+/// queryable in the database rather than living only in prose. A saved card and
+/// a saved TRC20 address are both `SETTLEMENT` — the power to move real money —
+/// which is why neither is *usable* until the stage boundary admits that class.
+enum CredentialClass {
+  PUBLIC
+  API_KEY
+  SUPPLIER
+  BOOKING
+  SETTLEMENT
+}
+
+/// A saved, reusable payment credential belonging to a shopper.
+///
+/// Hard rule, enforced by `pnpm credentials:contract`:
+/// **no PAN, expiry or CVC is ever stored here.** Only a gateway-issued token
+/// (or, for a self-custodial crypto address, the public receiving address) plus
+/// the display fragments the client already knows. Storing a card number would
+/// put the platform in PCI scope for no gain — the token is the whole point.
+model PaymentMethod {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  channel PaymentChannel
+  /// `visa` | `mastercard` | `amex` | `paypal` | `trc20` — display only.
+  brand   String?
+  /// Last four digits for cards / masked account for wallets. **Never** a full
+  /// number.
+  last4   String?
+  /// Operator-facing nickname ("My travel card", "USDT wallet").
+  label   String?
+
+  /// Gateway token / PayPal payer id / TRC20 receiving address. The only
+  /// credential-shaped value stored, and it is a reference, never a secret.
+  providerToken String?
+
+  /// The credential class this method exercises when used. `SETTLEMENT` for
+  /// every real rail, which is exactly why usage is boundary-gated.
+  credentialClass CredentialClass @default(SETTLEMENT)
+
+  isDefault Boolean   @default(false)
+  /// Set once the gateway has verified the method (e.g. a $0 auth or a
+  /// micro-deposit). An unverified method must not be the default.
+  verifiedAt DateTime?
+  /// Cards only; null for wallets and crypto.
+  expiresAt  DateTime?
+
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId, isDefault])
+  @@index([channel])
 }
 
 // Merchants own inventory in the platform/partner model (stage 2).
@@ -175,6 +234,95 @@ model SupplySourceRecord {
   @@index([entityType, entityId])
   @@index([sourceId])
   @@index([origin])
+}
+
+// ===========================================================================
+// Inventory feed: third-party rows that are staged, never sold
+//
+// A hotel row scraped from a supplier feed is *evidence*, not a listing. The
+// README's scope note stands: this platform's products are first-party records.
+// A scraped row becomes one only after an operator promotes it (see
+// `modules/inventory-feed/promote.ts`), at which point it is re-priced from our
+// own cost basis.
+//
+// The blast-radius rule is the load-bearing part:
+//   **nothing that reads `Product` may read `ScrapedInventory`**, and the ingest
+//   module must not import `pricing/`, `inventory/` or `booking/`.
+// `pnpm inventory:contract` enforces it offline.
+// ===========================================================================
+
+enum ScrapedStatus {
+  /// Freshly ingested, awaiting operator review.
+  NEW
+  /// An operator looked at it; not yet promoted.
+  REVIEWED
+  /// Promoted into a `Product`. See `Product.sourceScrapedId`.
+  PROMOTED
+  /// Deliberately not sellable (duplicate, dead link, terms). Kept so a re-run
+  /// does not resurrect it — a rejection must have somewhere to live.
+  REJECTED
+  /// Not confirmed by a recent successful sync. Cannot be promoted, and its
+  /// product is paused rather than sold at a stale price.
+  STALE
+}
+
+/// A raw hotel row as returned by the inventory scraper (Apify Expedia Hotels).
+///
+/// Deliberately NOT a Product. Scraped prices are third-party, stale and
+/// unverifiable, and — the whole reason this table exists — writing one into
+/// `TicketType.basePriceCents` would let a scraper bug become a pricing bug at
+/// scale and corrupt the `OrderItem` snapshots that explain previous orders.
+model ScrapedInventory {
+  id String @id @default(cuid())
+
+  // --- provenance: which run produced this, and when -----------------------
+  /// Namespaced feed id. Written at ingest time, never inferred at read time.
+  source String @default("apify:jupri/expedia-hotels")
+  /// Apify run id, kept so a batch can be attributed, replayed or cost-audited.
+  sourceRunId String?
+  /// Supplier hotel id (Expedia numeric). Non-null by construction: `""` means
+  /// the feed gave none, and those rows are skipped *before* insert, because
+  /// Prisma cannot put a nullable field in a `@@unique` and an unidentifiable
+  /// row could never be refreshed anyway.
+  externalId String @default("")
+  /// hotels.com-style reference, when the payload carries one.
+  externalRef String?
+  fetchedAt DateTime @default(now())
+  /// Last successful refresh that confirmed this row still exists upstream.
+  syncedAt DateTime?
+
+  // --- candidate display data (not yet a listing) --------------------------
+  name String
+  citySlug String?
+  countryCode String? @db.Char(2)
+  latitude Float?
+  longitude Float?
+  starRating Float?
+  propertyUrl String?
+
+  // --- money: evidence, never an input to `computeQuote` -------------------
+  priceCents Int?
+  currency String? @db.Char(3)
+  /// The original price string, kept so a unit/currency ambiguity is resolved
+  /// by a human rather than guessed by a parser.
+  rawPriceText String?
+  checkIn DateTime? @db.Date
+  checkOut DateTime? @db.Date
+
+  /// The untouched payload, PII stripped. Kept so a feed schema change costs a
+  /// mapping migration plus a backfill from this column — not a paid re-scrape.
+  raw Json
+
+  // --- lifecycle -----------------------------------------------------------
+  status ScrapedStatus @default(NEW)
+  /// Set on promote. Mirrors `Product.sourceScrapedId` for queue queries.
+  promotedProductId String?
+  notes String?
+
+  @@unique([source, externalId])
+  @@index([status, fetchedAt])
+  @@index([citySlug])
+  @@index([promotedProductId])
 }
 
 enum MerchantStatus {
@@ -382,6 +530,11 @@ model Product {
   flight  ProductFlight?
   sailing ProductSailing?
   vehicle ProductVehicle?
+
+  /// Set only when this product was promoted from a scraped row. Null for every
+  /// first-party product. Provenance/reporting only — never read by pricing, and
+  /// never a source of money. Points at `ScrapedInventory.id`.
+  sourceScrapedId String? @unique
 
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -993,6 +1146,10 @@ enum PaymentChannel {
   WALLET
   VOUCHER
   CASH_ON_SITE
+  /// Self-custodial Tron (TRC20) USDT settlement. Modelled in this stage;
+  /// sandbox-only, and gated by the same credential boundary as every other
+  /// settlement rail — see modules/supply/credentials.ts.
+  CRYPTO_TRC20
 }
 
 enum PaymentStatus {

@@ -5,6 +5,7 @@ import { logger } from '../lib/logger';
 import { AppError } from '../utils/errors';
 import { requireRole } from '../plugins/auth';
 import { generateIdempotencyKey } from '../utils/ids';
+import { removePaymentMethod, setDefaultPaymentMethod } from '../modules/payments/methods';
 
 /**
  * ---------------------------------------------------------------------------
@@ -48,6 +49,35 @@ const CUSTOMER_SELECT = {
   walletEnabled: true,
   createdAt: true,
 } as const;
+
+/**
+ * The payment-method shape support may see: a token-backed reference, never a
+ * secret. `providerToken` is omitted for the same reason the customer API omits
+ * it — support needs to identify a card, not to use it.
+ */
+function toSupportMethod(method: {
+  id: string;
+  channel: string;
+  brand: string | null;
+  last4: string | null;
+  label: string | null;
+  isDefault: boolean;
+  verifiedAt: Date | null;
+  expiresAt: Date | null;
+  createdAt: Date;
+}) {
+  return {
+    id: method.id,
+    channel: method.channel,
+    brand: method.brand,
+    last4: method.last4,
+    label: method.label,
+    isDefault: method.isDefault,
+    verified: method.verifiedAt !== null,
+    expiresAt: method.expiresAt,
+    createdAt: method.createdAt,
+  };
+}
 
 const lookupQuery = z.object({
   q: z.string().trim().min(2).max(120).optional(),
@@ -230,18 +260,70 @@ export async function supportRoutes(app: FastifyInstance): Promise<void> {
           },
         },
         walletLedger: { orderBy: { createdAt: 'desc' }, take: 20 },
+        // Saved payment references. Never a secret: only a token, brand and the
+        // last four — see modules/payments/methods.ts.
+        paymentMethods: { orderBy: [{ isDefault: 'desc' }, { createdAt: 'desc' }] },
       },
     });
 
     if (!user) throw AppError.notFound('Customer');
 
-    const { orders, walletLedger, loyaltyAccount, ...profile } = user;
+    const { orders, walletLedger, loyaltyAccount, paymentMethods, ...profile } = user;
 
     return {
       ...shapeCustomer({ ...profile, loyaltyAccount, _count: { orders: orders.length, reviews: 0 } }),
       orders,
       walletTransactions: walletLedger,
+      paymentMethods: paymentMethods.map(toSupportMethod),
     };
+  });
+
+  /**
+   * Detach a saved payment method from a customer.
+   *
+   * Support may *remove* a compromised or stale method, and set which one is
+   * default — but may never *add* one, because adding requires the customer's
+   * own token. That asymmetry is deliberate: a support agent cannot introduce a
+   * payment credential.
+   */
+  app.delete('/support/customers/:id/payment-methods/:methodId', supportOnly, async (request) => {
+    const { id, methodId } = z.object({ id: z.string(), methodId: z.string() }).parse(request.params);
+
+    const method = await prisma.paymentMethod.findUnique({ where: { id: methodId } });
+    if (!method || method.userId !== id) throw AppError.notFound('Payment method');
+
+    await removePaymentMethod(id, methodId);
+
+    await audit({
+      request,
+      action: 'support.payment_method.remove',
+      entityType: 'PaymentMethod',
+      entityId: methodId,
+      before: { channel: method.channel, brand: method.brand, last4: method.last4, isDefault: method.isDefault },
+    });
+
+    return { ok: true, removedId: methodId };
+  });
+
+  /** Make one of a customer's saved methods their default. */
+  app.patch('/support/customers/:id/payment-methods/:methodId', supportOnly, async (request) => {
+    const { id, methodId } = z.object({ id: z.string(), methodId: z.string() }).parse(request.params);
+    const body = z.object({ isDefault: z.literal(true) }).parse(request.body ?? {});
+
+    const method = await prisma.paymentMethod.findUnique({ where: { id: methodId } });
+    if (!method || method.userId !== id) throw AppError.notFound('Payment method');
+
+    await setDefaultPaymentMethod(id, methodId);
+
+    await audit({
+      request,
+      action: 'support.payment_method.set_default',
+      entityType: 'PaymentMethod',
+      entityId: methodId,
+      after: { isDefault: body.isDefault },
+    });
+
+    return { ok: true, defaultId: methodId };
   });
 
   // -------------------------------------------------------------------------

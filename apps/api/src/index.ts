@@ -17,6 +17,8 @@ import { registerErrorHandler } from './plugins/error-handler';
 import { adminRoutes } from './routes/admin.routes';
 import { authRoutes } from './routes/auth.routes';
 import { cartRoutes } from './routes/cart.routes';
+import { accountRoutes } from './routes/account.routes';
+import { inventoryFeedRoutes } from './routes/inventory-feed.routes';
 import { itineraryRoutes, loyaltyRoutes } from './routes/loyalty.routes';
 import { notificationRoutes } from './routes/notifications.routes';
 import { orderRoutes } from './routes/orders.routes';
@@ -153,12 +155,15 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(productRoutes, { prefix: '/api/v1' });
   await app.register(authRoutes, { prefix: '/api/v1' });
   await app.register(cartRoutes, { prefix: '/api/v1' });
+  await app.register(accountRoutes, { prefix: '/api/v1' });
   await app.register(orderRoutes, { prefix: '/api/v1' });
   await app.register(ticketingRoutes, { prefix: '/api/v1' });
   await app.register(socialRoutes, { prefix: '/api/v1' });
   await app.register(loyaltyRoutes, { prefix: '/api/v1' });
   await app.register(itineraryRoutes, { prefix: '/api/v1' });
   await app.register(adminRoutes, { prefix: '/api/v1' });
+  // Flag-gated: returns 404 while INVENTORY_FEED_ENABLED=false.
+  await app.register(inventoryFeedRoutes, { prefix: '/api/v1' });
   await app.register(promoRoutes, { prefix: '/api/v1' });
   await app.register(supportRoutes, { prefix: '/api/v1' });
   await app.register(notificationRoutes, { prefix: '/api/v1' });

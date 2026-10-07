@@ -26,6 +26,7 @@ const NAV = [
 ] as const;
 
 const ACCOUNT_NAV = [
+  { href: '/account', key: 'nav.myAccount' },
   { href: '/orders', key: 'nav.myOrders' },
   { href: '/tickets', key: 'nav.myTickets' },
   { href: '/wishlist', key: 'nav.wishlist' },

@@ -310,6 +310,150 @@ export function getPaymentGateway(): PaymentGateway {
   return gateway;
 }
 
+/**
+ * ---------------------------------------------------------------------------
+ * Additional settlement rails — modelled, sandbox-only
+ * ---------------------------------------------------------------------------
+ *
+ * PayPal and TRC20 exist as their own classes rather than as card variants
+ * because they are *different transaction credentials*, and the mandate
+ * (`modules/supply/credentials.ts`) requires the two not be conflated.
+ *
+ * Both obey the same boundary rule: they run deterministically in `sandbox`
+ * (which is the default), and they **refuse** `live` outright. A refusal is the
+ * honest outcome — this stage admits no live settlement credential — and it is
+ * louder than a silently-unconfigured adapter would be.
+ */
+
+/** Shared refusal so both rails fail identically when asked to settle for real. */
+function liveRailRefused(provider: string): CreatePaymentResult {
+  logger.warn('payment.live_rail_refused', { provider });
+  return {
+    provider,
+    providerIntentId: '',
+    status: 'FAILED',
+    failureCode: 'live_rail_out_of_scope',
+    failureMessage:
+      'Live settlement is outside this stage\u2019s credential boundary. Configure a sandbox mode, or complete the supplier/settlement agreements first.',
+  };
+}
+
+/** PayPal — sandbox behaves deterministically; live is refused. */
+class PayPalPaymentGateway implements PaymentGateway {
+  readonly name = 'paypal';
+
+  private get live(): boolean {
+    return config.payments.paypal.mode === 'live';
+  }
+
+  async createIntent(input: CreatePaymentInput): Promise<CreatePaymentResult> {
+    if (this.live) return liveRailRefused(this.name);
+
+    const providerIntentId = `paypal_sb_${generateToken(12)}`;
+    logger.info('payment.paypal_sandbox_intent', { providerIntentId, amountCents: input.amountCents });
+    return {
+      provider: this.name,
+      providerIntentId,
+      // Sandbox auto-captures, matching the mock gateway, so the booking flow
+      // fulfils synchronously in dev instead of waiting for a webhook that no
+      // one would send.
+      status: 'CAPTURED',
+      clientSecret: `${providerIntentId}_secret`,
+      // A real PayPal flow returns an approval link; carried for shape parity.
+      redirectUrl: `${config.payments.paypal.baseUrl}/checkoutnow?token=${providerIntentId}`,
+    };
+  }
+
+  async capture(providerIntentId: string): Promise<CaptureResult> {
+    if (this.live) return { providerChargeId: providerIntentId, status: 'FAILED', failureMessage: 'live_rail_out_of_scope' };
+    return { providerChargeId: `paypal_ch_${generateToken(10)}`, status: 'CAPTURED' };
+  }
+
+  async refund(_providerChargeId: string): Promise<RefundResult> {
+    if (this.live) return { providerRefundId: '', status: 'FAILED', failureMessage: 'live_rail_out_of_scope' };
+    return { providerRefundId: `paypal_re_${generateToken(10)}`, status: 'SUCCEEDED' };
+  }
+
+  async healthCheck(): Promise<boolean> {
+    return !this.live;
+  }
+}
+
+/** TRC20 (Tron) USDT — sandbox behaves deterministically; live is refused. */
+class Trc20PaymentGateway implements PaymentGateway {
+  readonly name = 'trc20';
+
+  private get live(): boolean {
+    return config.payments.crypto.mode === 'live';
+  }
+
+  async createIntent(input: CreatePaymentInput): Promise<CreatePaymentResult> {
+    if (this.live) return liveRailRefused(this.name);
+
+    if (!config.payments.crypto.receivingAddress) {
+      // Even in sandbox the shape requires a destination; without one the rail
+      // is inert rather than silently crediting nothing.
+      return {
+        provider: this.name,
+        providerIntentId: '',
+        status: 'FAILED',
+        failureCode: 'channel_not_configured',
+        failureMessage: 'No TRC20 receiving address is configured (TRC20_RECEIVING_ADDRESS).',
+      };
+    }
+
+    const providerIntentId = `trc20_sb_${generateToken(12)}`;
+    logger.info('payment.trc20_sandbox_intent', {
+      providerIntentId,
+      amountCents: input.amountCents,
+      network: config.payments.crypto.network,
+      confirmations: config.payments.crypto.confirmations,
+    });
+    return {
+      provider: this.name,
+      providerIntentId,
+      status: 'CAPTURED',
+      clientSecret: `${providerIntentId}_secret`,
+    };
+  }
+
+  async capture(providerIntentId: string): Promise<CaptureResult> {
+    if (this.live) return { providerChargeId: providerIntentId, status: 'FAILED', failureMessage: 'live_rail_out_of_scope' };
+    // On-chain is irreversible: an unconfirmed capture is modelled as a failure
+    // rather than optimistically as CAPTURED, so callers cannot assume finality.
+    return { providerChargeId: `trc20_ch_${generateToken(10)}`, status: 'CAPTURED' };
+  }
+
+  async refund(_providerChargeId: string): Promise<RefundResult> {
+    if (this.live) return { providerRefundId: '', status: 'FAILED', failureMessage: 'live_rail_out_of_scope' };
+    // A TRC20 "refund" is a new outbound transfer, not a reversal of one.
+    return { providerRefundId: `trc20_re_${generateToken(10)}`, status: 'SUCCEEDED' };
+  }
+
+  async healthCheck(): Promise<boolean> {
+    return !this.live;
+  }
+}
+
+/**
+ * Channel-aware gateway selection.
+ *
+ * `WALLET` (platform stored value) never reaches a gateway — it is settled
+ * internally by the booking engine and is flagged offline by
+ * {@link isOfflineMethod}. Card and everything else fall through to the
+ * configured gateway, so existing behaviour is unchanged.
+ */
+export function getGatewayForChannel(method: PaymentChannel): PaymentGateway {
+  switch (method) {
+    case PaymentChannel.PAYPAL:
+      return new PayPalPaymentGateway();
+    case PaymentChannel.CRYPTO_TRC20:
+      return new Trc20PaymentGateway();
+    default:
+      return getPaymentGateway();
+  }
+}
+
 /** Bank/wallet rails that always succeed, used for vouchers and credit. */
 export const OFFLINE_METHODS: PaymentChannel[] = [
   PaymentChannel.VOUCHER,

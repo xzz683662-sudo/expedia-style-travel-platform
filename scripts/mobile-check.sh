@@ -117,7 +117,7 @@ done
 # ---------------------------------------------------------------------------
 head2 "Server-rendered HTML"
 
-for path in / /search /cart /wishlist /itineraries /checkout /loyalty /tickets /orders /admin /admin/finance; do
+for path in / /search /cart /wishlist /itineraries /checkout /loyalty /tickets /orders /account /admin /admin/finance; do
   # /checkout redirects anonymous visitors to sign-in, so 307 is a healthy
   # response for it — the route exists and the auth gate is doing its job.
   case "$path" in

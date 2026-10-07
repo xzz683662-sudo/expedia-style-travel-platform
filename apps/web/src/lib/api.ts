@@ -715,6 +715,41 @@ export type AuditEntry = {
 
 export type SearchParams = Record<string, string | number | boolean | undefined | null>;
 
+/**
+ * A saved payment reference.
+ *
+ * Note what is *absent*: no card number, no expiry, no CVC. The API stores a
+ * gateway token plus display fragments, so there is nothing secret here to leak.
+ */
+export type SavedPaymentMethod = {
+  id: string;
+  channel: string;
+  brand: string | null;
+  last4: string | null;
+  label: string | null;
+  isDefault: boolean;
+  verified: boolean;
+  expiresAt: string | null;
+  createdAt: string;
+};
+
+export type PaymentChannelOption = {
+  channel: string;
+  /** What the channel needs before it can be saved. */
+  requires?: string[];
+  label?: string;
+};
+
+export type AddPaymentMethodInput = {
+  channel: 'CARD' | 'PAYPAL' | 'CRYPTO_TRC20';
+  label?: string;
+  isDefault?: boolean;
+  card?: { brand: string; last4: string; token?: string; expMonth?: number; expYear?: number };
+  paypal?: { payerId: string; email?: string };
+  crypto?: { address: string; network?: string };
+};
+
+
 function toQuery(params: SearchParams): string {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -816,6 +851,57 @@ export const api = {
       travelers: { id: string; fullName: string; email: string | null; isDefault: boolean }[];
       stats: { orders: number; reviews: number; wishlist: number };
     }>('/auth/me', { token, cache: 'no-store' }),
+
+  // --- Account centre ---
+  // Saved methods are references only: the API returns a brand + last four and
+  // never a card number, because it never accepts one.
+  accountOverview: (token: string) =>
+    request<{
+      profile: {
+        id: string;
+        email: string;
+        firstName: string;
+        lastName: string;
+        phone: string | null;
+        locale: string;
+        countryCode: string | null;
+        avatarUrl: string | null;
+        marketingOptIn: boolean;
+        emailVerified: boolean;
+        memberSince: string;
+      };
+      wallet: { balanceCents: number; enabled: boolean };
+      loyalty: { tier: string; points: number } | null;
+      travelers: { id: string; fullName: string; email: string | null; isDefault: boolean }[];
+      paymentMethods: SavedPaymentMethod[];
+      stats: { orders: number; reviews: number; wishlist: number };
+      channels: PaymentChannelOption[];
+    }>('/account/overview', { token, cache: 'no-store' }),
+
+  paymentMethods: (token: string) =>
+    request<{ methods: SavedPaymentMethod[]; channels: PaymentChannelOption[] }>('/account/payment-methods', {
+      token,
+      cache: 'no-store',
+    }),
+
+  addPaymentMethod: (token: string, body: AddPaymentMethodInput) =>
+    request<SavedPaymentMethod>('/account/payment-methods', { method: 'POST', body, token }),
+
+  setDefaultPaymentMethod: (token: string, id: string) =>
+    request<{ ok: boolean; defaultId: string }>(`/account/payment-methods/${id}`, {
+      method: 'PATCH',
+      body: { isDefault: true },
+      token,
+    }),
+
+  removePaymentMethod: (token: string, id: string) =>
+    request<{ ok: boolean; removedId: string }>(`/account/payment-methods/${id}`, { method: 'DELETE', token }),
+
+  paymentChannels: (token: string) =>
+    request<{ stage: string; channels: { channel: string; enabled: boolean; liveSettlement: boolean }[] }>(
+      '/account/payment-channels',
+      { token, cache: 'no-store' },
+    ),
 
   // --- Checkout & orders ---
   createOrder: (body: {

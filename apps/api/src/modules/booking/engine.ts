@@ -8,7 +8,7 @@ import { generateBarcode, generateOrderNumber, generateTicketNumber } from '../.
 import { allocate, applyBps, sumCents } from '../../utils/money';
 import { computeQuote, type Quote } from '../pricing/engine';
 import { consumeHold, placeHold, placeStayHold, releaseHold, returnSoldUnits } from '../inventory/engine';
-import { getPaymentGateway, isOfflineMethod } from '../payments/gateway';
+import { getGatewayForChannel, getPaymentGateway, isOfflineMethod } from '../payments/gateway';
 import { createInAppNotification, emitOrderCreated, emitOrderEvent, emitPaymentEvent } from '../realtime/notify';
 import { generateTicketArtifacts } from '../ticketing/issuer';
 
@@ -962,7 +962,10 @@ export async function initiatePayment(params: {
     return { paymentId: existing.id, status: existing.status, failureMessage: existing.failureMessage ?? undefined };
   }
 
-  const gateway = getPaymentGateway();
+  // Channel-aware: PayPal and TRC20 are their own settlement rails, each with
+  // its own (sandbox-only) adapter. Card and everything else keep the
+  // configured gateway, so existing behaviour is untouched.
+  const gateway = getGatewayForChannel(params.method);
   const result = await gateway.createIntent({
     amountCents: order.totalCents,
     currency: order.currency,

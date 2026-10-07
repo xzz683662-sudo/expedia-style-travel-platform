@@ -69,3 +69,27 @@ create index if not exists search_document_body_trgm
 -- Diacritic-insensitive title matching: lets "Familia" find "Família".
 create index if not exists search_document_title_unaccent_trgm
   on "SearchDocument" using gin (search_unaccent(lower(title)) gin_trgm_ops);
+
+-- ---------------------------------------------------------------------------
+-- Inventory feed: `ScrapedInventory` (staged third-party rows)
+-- ---------------------------------------------------------------------------
+-- The review queue and any operator search over staged rows resolve through
+-- `name`, exactly like `SearchDocument.title` above — a plain `ILIKE '%term%'`
+-- backed by a trigram index. This is the "index layer reads the database"
+-- property: a row that lands in `ScrapedInventory` is searchable with no extra
+-- pipeline, no search engine, and no reindex step.
+--
+-- Deliberately NO index over the scraped `priceCents`: a scraped price is
+-- evidence, not a query dimension. Indexing it would invite sorting or
+-- filtering a listing by it, which is the exact confusion the staging design
+-- exists to prevent.
+create index if not exists scraped_inventory_name_trgm
+  on "ScrapedInventory" using gin (name gin_trgm_ops);
+
+-- Operator search is usually scoped to a destination ("hotels in Amsterdam"),
+-- so the city filter should not fall back to a scan once the catalogue grows.
+-- Column is `citySlug`, not `city_slug`: Prisma uses the field name verbatim
+-- unless a model opts into `@map`, and this schema does not.
+create index if not exists scraped_inventory_city_trgm
+  on "ScrapedInventory" using gin ("citySlug" gin_trgm_ops);
+

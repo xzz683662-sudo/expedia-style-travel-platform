@@ -136,6 +136,80 @@ export const config = {
   },
 
   /**
+   * Inventory feed — third-party hotel rows, staged and never sold.
+   *
+   * A distinct subsystem from `supply.live` above: that layer moves the price a
+   * shopper is quoted; this one stages scraped *candidates* for an operator to
+   * promote by hand into first-party products (positioning option A). It writes
+   * only `ScrapedInventory` and never any table the booking path reads.
+   *
+   * Off by default, and that is a safety requirement rather than caution: with
+   * `INVENTORY_FEED_ENABLED=false` the `/admin/inventory-feed` routes 404 and no
+   * scheduler starts, so the platform is bit-for-bit unchanged.
+   */
+  inventoryFeed: {
+    enabled: str('INVENTORY_FEED_ENABLED', 'false') === 'true',
+    /** Apify API token. Never logged, never returned by a route. */
+    apifyToken: str('APIFY_TOKEN'),
+    /** Actor slug, `owner/name`. Overridable so the feed can be repointed. */
+    apifyActor: str('APIFY_HOTEL_ACTOR', 'jupri/expedia-hotels'),
+    /**
+     * Portal id selecting the actor's **region and currency** (its `site`
+     * input). `"1"` is Expedia US, which answers in **USD** — the platform's
+     * settlement currency, so no conversion is needed for the staged figure.
+     *
+     * The actor validates this as a numeric id, not a hostname: sending
+     * `"expedia.com"` fails with `Field input.site must be equal to one of the
+     * allowed values`. See docs/supply-sources.md for the probed evidence.
+     */
+    site: str('APIFY_HOTEL_SITE', '1'),
+    /** Locale the actor answers in, e.g. `en_US`. */
+    language: str('APIFY_HOTEL_LANGUAGE', 'en_US'),
+    /**
+     * Which `includes:*` blocks to request, comma-separated: `offers`,
+     * `location`, `amenities`, `review`, `calendar`, `availability`, ...
+     *
+     * Empty by default because every block is extra upstream traffic, and the
+     * actor's reliability is the constraint (measured 0.107%). Enable only the
+     * blocks a promotion actually needs — `offers` carries room prices,
+     * `location` carries the coordinates the catalogue stores.
+     */
+    includes: str('APIFY_HOTEL_INCLUDES', '')
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean),
+    /**
+     * Operator-supplied proxy for the actor's `dev_proxy_config`, as a JSON
+     * object string. Empty means "use the actor's default (Apify residential)". 
+     *
+     * This exists because the default is the problem: every probed run failed
+     * with `HTTP 429 Too Many Requests` coming through
+     * `<http://groups-RESIDENTIAL@…> (REQUIRED)` — Apify's *shared* residential
+     * proxy group, which Expedia rate-limits across all 677 actor users. The
+     * actor documents `dev_proxy_config` (HTTP(S) or SOCKS5) as the way to
+     * supply your own egress.
+     *
+     * Supplied as raw JSON rather than a URL so this code does not *guess* the
+     * object's field names — the actor's schema is undocumented beyond the URL
+     * format, so the exact shape stays the operator's to provide:
+     *
+     *   APIFY_HOTEL_PROXY_CONFIG='{"useApifyProxy":false,"proxyUrls":["socks5://host:9000"]}'
+     */
+    proxyConfig: str('APIFY_HOTEL_PROXY_CONFIG'),
+    /**
+     * Refuse to start a batch that would exceed this many rows. A run is billed
+     * per platform usage, so an accidental unbounded `limit` is a bill, not just
+     * a slow job.
+     */
+    maxRowsPerRun: int('INVENTORY_FEED_MAX_ROWS', 500),
+    /** How long to wait for an Apify run before giving up on it. */
+    runTimeoutMs: int('INVENTORY_FEED_RUN_TIMEOUT_MS', 900_000),
+    pollIntervalMs: int('INVENTORY_FEED_POLL_MS', 5_000),
+    /** A row not confirmed by a successful sync within this window is STALE. */
+    staleAfterHours: int('INVENTORY_FEED_STALE_HOURS', 48),
+  },
+
+  /**
    * FX — turning an upstream rate into the currency the platform sells in.
    *
    * Needed because upstreams choose their own currency (trvl is EUR-only,
@@ -175,6 +249,36 @@ export const config = {
     declineSuffix: str('MOCK_DECLINE_SUFFIX', '0002'),
     /** Cards ending with these digits force an authorisation failure. */
     failureSuffix: str('MOCK_FAILURE_SUFFIX', '0119'),
+
+    /**
+     * PayPal — a modelled settlement rail.
+     *
+     * `mode` defaults to `sandbox` and MUST stay there for this stage: the
+     * credential boundary (modules/supply/credentials.ts) admits no live
+     * settlement credential yet. `live` is refused at the adapter, not merely
+     * unconfigured, so a stray env var cannot move real money.
+     */
+    paypal: {
+      mode: str('PAYPAL_MODE', 'sandbox'),
+      clientId: str('PAYPAL_CLIENT_ID'),
+      clientSecret: str('PAYPAL_CLIENT_SECRET'),
+      baseUrl: str('PAYPAL_BASE_URL', 'https://api-m.sandbox.paypal.com'),
+    },
+
+    /**
+     * TRC20 (Tron) USDT — a modelled self-custodial settlement rail.
+     *
+     * Same boundary as PayPal, with one extra reason to be careful: on-chain
+     * settlement is irreversible. It is therefore a separate, explicitly-enabled
+     * rail rather than a card variant, and it ships sandbox-only.
+     */
+    crypto: {
+      mode: str('TRC20_MODE', 'sandbox'),
+      receivingAddress: str('TRC20_RECEIVING_ADDRESS'),
+      network: str('TRC20_NETWORK', 'tron'),
+      /** Confirmations before a transfer is treated as settled. */
+      confirmations: int('TRC20_CONFIRMATIONS', 19),
+    },
   },
 
   booking: {

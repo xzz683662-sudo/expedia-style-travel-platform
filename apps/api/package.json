@@ -18,6 +18,11 @@
     "supply:import": "tsx prisma/supply-import.ts",
     "supply:probe": "tsx prisma/live-rate-probe.ts",
     "supply:contract": "tsx prisma/live-contract-check.ts",
+    "inventory:contract": "tsx prisma/inventory-feed-check.ts",
+    "inventory:integration": "tsx prisma/inventory-feed-integration.ts",
+    "inventory:index": "tsx prisma/inventory-feed-index-check.ts",
+    "credentials:contract": "tsx prisma/credentials-check.ts",
+    "account:integration": "tsx prisma/account-integration.ts",
     "db:indexes": "tsx prisma/apply-indexes.ts"
   },
   "prisma": {
