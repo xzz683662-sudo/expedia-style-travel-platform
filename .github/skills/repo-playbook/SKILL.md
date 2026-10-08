@@ -193,6 +193,33 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
 - Measured on 230 rows: `to_tsvector` was **54 ms vs 1 ms** for a plain trigram-backed
   `LIKE`, and `to_tsvector('simple', …)` cannot segment Chinese at all. FTS is a net loss
   here — see `docs/search-index-design.md`. Do not "upgrade" search to FTS without re-measuring.
+- **`CANDIDATE_LIMIT` caps how many results search can report, silently.** `total` is
+  `Math.min(count, hits.length)`, and `hits` comes from a `take: CANDIDATE_LIMIT` query. At
+  400 against a 468-product catalogue the last 70 listings vanished from *every* search,
+  including an unfiltered one — no error, just a result count that stopped growing. The
+  same class of bug as a `take` on `/destinations` (which hid Sydney and Melbourne). The
+  constant is now 2000 and logs `search.candidates_truncated` if the catalogue outgrows it.
+
+### Connections / flight schedules
+
+- **`CONNECTING_ITINERARIES` is keyed by the exact route string**, so it only schedules the
+  itineraries someone remembered to add. Generating routes against a hand-kept table drifts:
+  three connecting products (`HKG→DXB→LAX`, `SIN→DXB→LAX`, `LAX→DXB→JFK`) were seeded with
+  **null** leg times. `segmentsFor` now falls back to `synthesisedSchedule`, which derives a
+  deterministic 5–13 h block time per leg and the same 3 h 25 m hub layover the table uses.
+- **A null layover is not filterable, and that is a user-visible bug.** `withinLayoverBounds`
+  deliberately passes an itinerary whose gap cannot be computed ("a filter the data cannot
+  answer must not hide every result"), so a schedule-less itinerary survived
+  `maxLayoverMinutes=1` — a shopper asking for a tight connection was shown a journey of
+  unknown length. The smoke assertion `an impossible layover cap excludes everything` is what
+  catches this; it fails with `(3 of 9)` when a connecting route has no times.
+- **`routeSignature` must include the timestamps.** Comparing airports only treats "no times"
+  and "times" as identical, so adding a schedule re-runs the backfill, reports the itinerary
+  unchanged, and leaves the null legs in place. Same lesson as `segmentCount` vs airports:
+  the comparison has to cover everything the fix changes.
+- Repairing the extension tables does not need a full re-seed (which spends ~6 min on 214k
+  inventory rows). `npx tsx prisma/backfill-extensions.ts` runs just the backfill; it is
+  idempotent by comparison. Expect `{"flight":3,...}` for the case above.
 
 ### Ticketing
 
@@ -236,6 +263,66 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
   the photo never loads (white text on the light-grey card). `.product-media` and
   `.destination-media` back their images with a dark background plus a gradient scrim for this
   reason, and `SafeImage` swaps in a fallback rather than showing a broken-image icon.
+- **No two products may share a photograph, and `pnpm check:media` enforces it.** The catalogue
+  used to draw every product from a pool of **three or four** images per category: 459 media rows
+  held 62 distinct URLs, and one Rome Colosseum frame was on 30 cards. `seed-global.ts`'s
+  `claimImage` now hands each image out **at most once** across the whole catalogue, drawing from
+  `photo-pools.ts` (per category) and `city-images.ts` (per city). If a pool runs dry `claimImage`
+  **throws** — a silent wrap-around is exactly how the original duplication got in, so grow the
+  pool with `pnpm images:build` instead of loosening the check.
+- **`pnpm images:build` needs throttling and retries, and that is not optional.** Wikimedia
+  rate-limits anonymous clients. Without a pause the later categories came back with **zero**
+  candidates — the API had started answering `429` and the build read it as "no results", which is
+  how a pool can silently end up empty while looking like it succeeded. `jsonFetch` now pauses,
+  honours `Retry-After`, and retries `429`/`5xx`; keep it that way.
+- **A pool saturates long before its target.** Commons caps one search response, so the pool grows
+  by following the API's `gsroffset` cursor (`PAGES_PER_QUERY`), not by asking for a bigger page.
+  With ~20 terms per category, 6 pages each and a 2 MP floor the yield is ~2,300 images; the
+  subject de-duplication (`subjectKey`) is what stops a batch upload of one scene filling the pool.
+- **Place categories are illustrated from the city; thing categories from the category.**
+  `GUIDED_TOUR` / `ATTRACTION_TICKET` / `ACTIVITY` show a *place*, so they take that city's own
+  photographs first (a Paris attraction must not show a Roman amphitheatre). `FLIGHT` /
+  `HOTEL_ROOM` / `CRUISE` show a *thing*, so the city is irrelevant.
+- **A generated product carries one image, not a gallery.** The pool of genuinely distinct,
+  correctly-licensed photographs is bounded and `claimImage` refuses to reuse one — one unique
+  picture is worth more than two that repeat something else. `catalogue-report.ts` asserts *one*
+  for this reason; it used to demand two, which is the shape the duplication came from.
+- **Hand-authored galleries are de-duplicated at load time, not by hand.** `dedupeFeaturedMedia`
+  in `seed-products.ts` keeps the first use of each picture and swaps any later one for the next
+  unused photograph *of the same city*. The nine offending slots appear in `FEATURED_PRODUCTS`
+  because their images were chosen individually over a long period; patching them by hand would
+  leave the trap for the next edit.
+- **The home page must not show one product twice.** The rails are independent queries
+  (`trending` by popularity, `top-rated` by rating, two by nothing), so they overlap freely — one
+  product came first in all four and its photograph appeared four times down the page. `page.tsx`
+  claims each product for the first rail that renders it. Verify with
+  `node scripts/ux-audit/verify-home-images.mjs`, which reads the **rendered DOM** at both
+  breakpoints; counting `<img>` tags in the server HTML only proves the markup, not the page.
+
+### Catalogue scale: `LISTINGS_BY_TIER` and the name rotation
+
+- **Cities are sized by tier, not uniformly.** `LISTINGS_BY_TIER` in `seed-global.ts` gives a
+  global capital ~80 listings and a small town ~34, which is what makes a city page feel stocked.
+  `CITY_TIER` maps each slug explicitly — an index-based split off `CITIES` is possible but wrong,
+  because that array is grouped by *region*, so it would put Bath in the top tier and Tokyo in the
+  bottom. A city missing from `CITY_TIER` **throws** rather than silently building at zero.
+- **Every name template list must be at least as long as the largest tier's count for that
+  category.** `pickDistinct` rotates a list by the ordinal, so a 4-entry `HOTEL_NAMES` against 16
+  hotels wrapped and named three Paris hotels "Paris Palace — Premier Suite". `FLIGHT_NAMES` now
+  has 6 entries for this reason, and `SETTINGS` has 20. `catalogue-report.ts` fails on a duplicate
+  name within one city+category, which is the assertion that catches this.
+- **Rotate on a *fixed per-city base*, never on a per-listing seed.** `pickDistinct(list, family, n)`
+  is a rotation and cannot collide; `pickDistinct(list, seedIncludingOrdinal, n)` is n independent
+  hashes and can. The same mistake on the cruise departure month produced two identical sailings
+  out of one city.
+- **A second axis must rotate slower than the first.** Flights rotate the carrier on the ordinal
+  and the hub once per full carrier cycle (`Math.floor(ordinal / carriers.length)`), giving
+  `carriers × hubs` distinct pairs; rotating both on the ordinal gives only `coprime` pairs.
+- **When a name genre runs out of variation, add a *real* discriminator.** A cruise is a dated
+  departure, so its name carries a sailing month; pretending otherwise means inventing numbers.
+- Seeding 1,715 products writes ~5,100 ticket types and ~780k inventory rows, so a full
+  `db:seed` takes tens of minutes. `npx tsx prisma/backfill-extensions.ts` repairs the category
+  extension tables without paying that cost.
 
 ### API contract gotchas
 

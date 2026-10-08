@@ -215,6 +215,73 @@ function emptyFacets(): Facets {
  * a shopper whose price moved needs to be able to see that an upstream moved it,
  * and support needs to know which source to ask.
  */
+/**
+ * Sellable units per ticket type, summed by the database.
+ *
+ * **The aggregate is the whole point of this function.** The obvious
+ * implementation — fetch each ticket type with its `InventoryRecord` rows
+ * nested and reduce them in Node — loads one object per row. At 5,133 ticket
+ * types and a 120-day window that is roughly 200,000 rows per search, and a
+ * single unfiltered request was measured growing the API's RSS by **707 MB**
+ * (122 MB → 829 MB in 5.7 s). `pnpm verify` runs search hundreds of times, so
+ * the container ran out of memory and the API was killed mid-suite.
+ *
+ * Postgres can add those numbers up without shipping them: `groupBy` returns
+ * one row per ticket type, so the memory cost is proportional to the number of
+ * *listings*, not to the number of inventory rows. Only three numbers are ever
+ * needed — capacity, held, sold — and none of them needs its rows in Node.
+ *
+ * `rows` is returned alongside because `UNLIMITED` inventory counts 1,000 units
+ * *per row*, which is a row count rather than a capacity sum.
+ */
+async function sumSellableUnits(
+  ticketTypes: { id: string; inventoryMode: InventoryMode }[],
+  dates: Date[],
+): Promise<Map<string, { sellable: number; rows: number }>> {
+  const totals = new Map<string, { sellable: number; rows: number }>();
+  if (ticketTypes.length === 0) return totals;
+
+  const ids = ticketTypes.map((t) => t.id);
+  const modeById = new Map(ticketTypes.map((t) => [t.id, t.inventoryMode]));
+  const now = new Date();
+
+  // Postgres caps a statement at 65,535 bind parameters; one id per chunk keeps
+  // this far below it and bounds the result set as the catalogue grows.
+  const CHUNK = 1000;
+  for (let offset = 0; offset < ids.length; offset += CHUNK) {
+    const rows = await prisma.inventoryRecord.groupBy({
+      by: ['ticketTypeId'],
+      where: {
+        ticketTypeId: { in: ids.slice(offset, offset + CHUNK) },
+        // A closed or sold-out record contributes nothing, so it is excluded
+        // rather than fetched and skipped — the same arithmetic, less data.
+        status: { notIn: ['CLOSED', 'SOLD_OUT'] },
+        serviceDate: dates.length ? { in: dates } : { gte: now },
+      },
+      _sum: { capacityTotal: true, capacityHeld: true, capacitySold: true },
+      _count: { _all: true },
+    });
+
+    for (const row of rows) {
+      const capacity = row._sum.capacityTotal ?? 0;
+      const held = row._sum.capacityHeld ?? 0;
+      const sold = row._sum.capacitySold ?? 0;
+      const count = row._count?._all ?? 0;
+      const sellable = modeById.get(row.ticketTypeId) === 'UNLIMITED' ? count * 1_000 : Math.max(0, capacity - held - sold);
+      totals.set(row.ticketTypeId, { sellable, rows: count });
+    }
+  }
+
+  // A ticket type with no sellable records at all is absent from `groupBy`,
+  // which reads as zero. Stating it explicitly keeps the availability gate
+  // below a simple lookup rather than a "missing means zero" convention.
+  for (const id of ids) {
+    if (!totals.has(id)) totals.set(id, { sellable: 0, rows: 0 });
+  }
+
+  return totals;
+}
+
 async function resolveAvailabilityAndPrice(
   productIds: string[],
   dates: Date[],
@@ -234,6 +301,8 @@ async function resolveAvailabilityAndPrice(
   });
   const bundleProductIds = new Set(bundleRows.map((b) => b.productId));
 
+  // Ticket types carry only what pricing and the availability gate need. The
+  // inventory is deliberately *absent* here — see `sumSellableUnits`.
   const ticketTypes = await prisma.ticketType.findMany({
     where: { productId: { in: productIds }, active: true },
     select: {
@@ -242,18 +311,13 @@ async function resolveAvailabilityAndPrice(
       basePriceCents: true,
       compareAtCents: true,
       inventoryMode: true,
-      inventory: dates.length
-        ? { where: { serviceDate: { in: dates } }, select: { capacityTotal: true, capacityHeld: true, capacitySold: true, status: true } }
-        : { where: { serviceDate: { gte: new Date() } }, select: { capacityTotal: true, capacityHeld: true, capacitySold: true, status: true }, take: 40 },
     },
   });
 
+  const units = await sumSellableUnits(ticketTypes, dates);
+
   for (const ticketType of ticketTypes) {
-    const available = ticketType.inventory.reduce((total, record) => {
-      if (record.status === 'CLOSED' || record.status === 'SOLD_OUT') return total;
-      if (ticketType.inventoryMode === 'UNLIMITED') return total + 1_000;
-      return total + Math.max(0, record.capacityTotal - record.capacityHeld - record.capacitySold);
-    }, 0);
+    const available = units.get(ticketType.id)?.sellable ?? 0;
 
     // With explicit dates we require availability on *at least one* of them;
     // this keeps multi-date browsing useful while never showing dead ends.
@@ -448,28 +512,19 @@ async function addBundleAvailability(
 
   const componentTypes = await prisma.ticketType.findMany({
     where: { id: { in: componentIds }, active: true },
-    select: {
-      id: true,
-      inventoryMode: true,
-      inventory: dates.length
-        ? { where: { serviceDate: { in: dates } }, select: { capacityTotal: true, capacityHeld: true, capacitySold: true, status: true } }
-        : { where: { serviceDate: { gte: new Date() } }, select: { capacityTotal: true, capacityHeld: true, capacitySold: true, status: true }, take: 40 },
-    },
+    select: { id: true, inventoryMode: true },
   });
+
+  // Same aggregate as the main path — a bundle's components have their own
+  // inventory, and loading their rows would reintroduce the memory blow-up
+  // `sumSellableUnits` exists to avoid.
+  const unitsById = await sumSellableUnits(componentTypes, dates);
 
   for (const bundle of bundles) {
     const own = result.get(bundle.productId);
     if (!own) continue;
 
-    const unitsFor = (ticketTypeId: string): number => {
-      const type = componentTypes.find((t) => t.id === ticketTypeId);
-      if (!type) return 0;
-      return type.inventory.reduce((total, record) => {
-        if (record.status === 'CLOSED' || record.status === 'SOLD_OUT') return total;
-        if (type.inventoryMode === 'UNLIMITED') return total + 1_000;
-        return total + Math.max(0, record.capacityTotal - record.capacityHeld - record.capacitySold);
-      }, 0);
-    };
+    const unitsFor = (ticketTypeId: string): number => unitsById.get(ticketTypeId)?.sellable ?? 0;
 
     // Required components gate the package; optional ones only widen it.
     const required = bundle.components.filter((c) => c.required);
@@ -497,8 +552,26 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): nu
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-/** Rows pulled from Postgres before availability/price resolution. */
-const CANDIDATE_LIMIT = 400;
+/**
+ * Rows pulled from Postgres before availability/price resolution.
+ *
+ * This is a **hard cap on how many results search can ever report**, because
+ * `total` is `Math.min(count, hits.length)` after the availability gate drops
+ * anything unbookable. Set below the catalogue size it does not merely slow
+ * things down — it silently deletes the tail. At 400 against a 468-product
+ * catalogue the last 70 listings stopped appearing in *any* search, including a
+ * plain unfiltered one, with no error anywhere. It is the same failure the
+ * `/destinations` endpoint had when a `take` hid Sydney and Melbourne.
+ *
+ * The cap exists because each candidate costs an inventory join (one
+ * `TicketType` fetch with nested `InventoryRecord`s) and a price resolution, so
+ * it is not free to remove. It is instead set well above the catalogue and
+ * guarded: if the count ever exceeds it, the request logs
+ * `search.candidates_truncated` so the next person finds a warning rather than a
+ * mystery. Grow the catalogue by an order of magnitude and this is the line to
+ * revisit.
+ */
+const CANDIDATE_LIMIT = 5000;
 
 /** Ranking window shared by the flat list, the category buckets and the facets. */
 function candidateOrderBy(sort: SortOption | undefined): Prisma.SearchDocumentOrderByWithRelationInput | undefined {
@@ -598,6 +671,17 @@ async function searchPostgres(params: SearchParams): Promise<SearchResult> {
   const where: Prisma.SearchDocumentWhereInput = typeFilter ? { ...whereBase, type: typeFilter } : whereBase;
 
   const total = await prisma.searchDocument.count({ where });
+
+  // Truncation used to be invisible: the cap silently removed listings from
+  // every result page, including an unfiltered one, and the only symptom was a
+  // result count that quietly stopped growing. Say it out loud instead.
+  if (total > CANDIDATE_LIMIT) {
+    logger.warn('search.candidates_truncated', {
+      matching: total,
+      candidateLimit: CANDIDATE_LIMIT,
+      note: 'raise CANDIDATE_LIMIT — the tail of these results is not being shown',
+    });
+  }
 
   const candidates = await prisma.searchDocument.findMany({
     where,

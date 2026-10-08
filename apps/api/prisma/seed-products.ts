@@ -1,5 +1,5 @@
 import type { SeedProduct } from './seed-data';
-import { buildGlobalProducts } from './seed-global';
+import { buildGlobalProducts, reserveImage, takeCityImage } from './seed-global';
 
 /**
  * The product catalogue.
@@ -19,7 +19,15 @@ import { buildGlobalProducts } from './seed-global';
  * the richer copy is never overwritten by a template.
  */
 
-const FEATURED_PRODUCTS: SeedProduct[] = [
+/**
+ * Hand-authored listings for specific, named landmarks.
+ *
+ * Exported so tooling can audit the artwork independently: these entries carry
+ * individually chosen photographs, which makes them the one place duplication
+ * could still enter the catalogue. `pnpm check:media` reads them through
+ * `PRODUCTS` and fails if any photograph is used twice.
+ */
+export const FEATURED_PRODUCTS: SeedProduct[] = [
   // =========================================================================
   // NEW YORK
   // =========================================================================
@@ -1631,14 +1639,70 @@ const FEATURED_PRODUCTS: SeedProduct[] = [
 ];
 
 /**
+ * Gives every hand-authored product a gallery with no repeated photograph.
+ *
+ * The generated catalogue is unique by construction (`claimImage`). The authored
+ * entries are not: their pictures were chosen one at a time over a long period,
+ * the same few frames were reused across products, and two entries ended up
+ * carrying one image twice. A shopper sees that as carelessness, and they are
+ * right to.
+ *
+ * Repairing the nine offending slots by hand would leave the trap in place for
+ * the next edit, so the rule is enforced instead: the first use of a picture is
+ * kept — it is usually the one that actually shows the landmark — and any later
+ * use is swapped for the next unused photograph **of the same city**. A gallery
+ * slot that would have repeated something else becomes a picture of the right
+ * place, which is strictly better than what it replaces.
+ *
+ * If a city has no imagery left the slot is dropped rather than repeated: a
+ * product with two distinct photographs is not a defect, two identical ones is.
+ */
+function dedupeFeaturedMedia(products: SeedProduct[]): void {
+  const claimed = new Set<string>();
+
+  for (const product of products) {
+    const gallery = product.media ?? [];
+    const repaired: typeof gallery = [];
+
+    for (const image of gallery) {
+      if (!claimed.has(image.url)) {
+        claimed.add(image.url);
+        repaired.push(image);
+        continue;
+      }
+      const alternative = takeCityImage(product.destinationSlug);
+      if (alternative) repaired.push(alternative);
+    }
+
+    product.media = repaired;
+  }
+}
+
+/**
  * The merged catalogue: generated first, then hand-authored entries layered on
  * top so a featured product replaces its generated counterpart.
  *
  * Deduplicated by slug via a Map — `PRODUCTS` is an array, so two records with
  * the same slug would make the seed's `upsert` write the same row twice and the
  * second (weaker) copy would win.
+ *
+ * Ordering here is load-bearing, not incidental:
+ *
+ *   1. the hand-authored galleries are repaired ({@link dedupeFeaturedMedia});
+ *   2. every authored photograph is reserved;
+ *   3. only then is the generated catalogue built.
+ *
+ * The generated half draws each image from a shared pool and skips anything
+ * already claimed, so reserving first is what stops a generated product from
+ * wearing a photograph that belongs to a named landmark.
  */
 export const PRODUCTS: SeedProduct[] = (() => {
+  dedupeFeaturedMedia(FEATURED_PRODUCTS);
+
+  for (const product of FEATURED_PRODUCTS) {
+    for (const image of product.media ?? []) reserveImage(image.url);
+  }
+
   const merged = new Map<string, SeedProduct>();
 
   for (const product of buildGlobalProducts()) merged.set(product.slug, product);

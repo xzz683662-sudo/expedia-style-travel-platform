@@ -28,6 +28,32 @@ export default async function HomePage() {
     api.collection('top-rated', null, locale).catch(() => null),
   ]);
 
+  /**
+   * No product is shown twice on the home page.
+   *
+   * The four rails are independent queries — `trending` sorts by popularity,
+   * `top-rated` by rating, and the other two by nothing in particular — so they
+   * overlap freely. One product came first in all four, which put its
+   * photograph on the page four times and made a merchandised home page read as
+   * a template loop. The rails are ordered deliberately, so the first rail that
+   * claims a product keeps it and later rails skip it.
+   *
+   * `take` is applied here rather than left to the rail's own `slice`, so a
+   * product that will not actually be displayed is not reserved against the
+   * rails below it — otherwise one rail's hidden surplus could empty the next.
+   */
+  const shown = new Set<string>();
+  const claim = <T extends { productId: string }>(items: T[], take: number): T[] => {
+    const out: T[] = [];
+    for (const item of items) {
+      if (out.length >= take) break;
+      if (shown.has(item.productId)) continue;
+      shown.add(item.productId);
+      out.push(item);
+    }
+    return out;
+  };
+
   return (
     <>
       {/* ---------------------------------------------------------------- */}
@@ -130,7 +156,7 @@ export default async function HomePage() {
           <Rail
             title={trending.title}
             subtitle={t('home.trendingSubtitle')}
-            hits={trending.items}
+            hits={claim(trending.items, 5)}
             locale={locale}
           />
         )}
@@ -145,7 +171,7 @@ export default async function HomePage() {
                 title={t('home.freeCancel')}
                 subtitle={t('home.freeCancelSubtitle')}
                 href="/collections/free-cancellation"
-                hits={freeCancel.items.slice(0, 3)}
+                hits={claim(freeCancel.items, 3)}
                 tone="success"
                 locale={locale}
               />
@@ -155,7 +181,7 @@ export default async function HomePage() {
                 title={t('home.skipTheLine')}
                 subtitle={t('home.skipLineSubtitle')}
                 href="/collections/skip-the-line"
-                hits={skipLine.items.slice(0, 3)}
+                hits={claim(skipLine.items, 3)}
                 tone="brand"
                 locale={locale}
               />
@@ -170,7 +196,7 @@ export default async function HomePage() {
           <Rail
             title={t('home.favourites')}
             subtitle={t('home.favouritesSubtitle')}
-            hits={topRated.items}
+            hits={claim(topRated.items, 5)}
             locale={locale}
           />
         )}

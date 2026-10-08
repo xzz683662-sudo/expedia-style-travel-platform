@@ -1,5 +1,8 @@
+import type { ProductType } from '@prisma/client';
 import type { SeedProduct, SeedTicketType } from './seed-data';
 import { CITIES, type CityDescriptor } from './seed-cities';
+import { PHOTO_POOLS } from './photo-pools';
+import { CITY_IMAGES } from './city-images';
 
 /**
  * ---------------------------------------------------------------------------
@@ -133,67 +136,253 @@ function offset(city: CityDescriptor, seed: string): { lat: number; lng: number 
 }
 
 /**
- * A real Unsplash photo for a category.
+ * Image allocation — the reason the storefront stopped repeating itself.
  *
- * The URLs are stable, well-known Unsplash photo ids that render reliably and
- * match their subject. `?auto=format&fit=crop&w=1200&q=80` asks Unsplash's
- * image CDN for a cropped, compressed 1200px-wide variant — without it every
- * card would pull the full-resolution original.
+ * The catalogue used to give every product a photo from a pool of three or four
+ * per category. With 230 products that put one Rome Colosseum photograph on 30
+ * separate cards, and the home page showed the same picture several times over.
+ *
+ * Two pools replace it, chosen by what a category promises:
+ *
+ *   - **FLIGHT, HOTEL_ROOM, CRUISE** show a *thing* — an aircraft, a room, a
+ *     ship. The city is irrelevant, so these draw from the category pool.
+ *   - **GUIDED_TOUR, ATTRACTION_TICKET, ACTIVITY** show a *place*. These draw
+ *     from the city's own photographs first, so an attraction in Paris shows
+ *     Paris rather than a Roman amphitheatre, and only fall back to the
+ *     category pool when a city has fewer images than it has products.
+ *
+ * Every image is handed out **at most once**, across the entire catalogue, so no
+ * two products anywhere in the storefront can carry the same photograph. That
+ * is why a generated product has a single image rather than a small gallery:
+ * the pool of genuinely distinct, correctly-licensed photographs is bounded, and
+ * one unique picture is worth more than two that repeat something else.
+ *
+ * When a pool runs dry this throws rather than looping. A silent wrap-around is
+ * exactly how the original duplication got in, so running out is a build error.
  */
-function photo(id: string, alt: string): { url: string; altText: string } {
-  return { url: `https://images.unsplash.com/${id}?auto=format&fit=crop&w=1200&q=80`, altText: alt };
+const CITY_TOPICAL: readonly ProductType[] = ['GUIDED_TOUR', 'ATTRACTION_TICKET', 'ACTIVITY'];
+
+const cityCursor = new Map<string, number>();
+const categoryCursor = new Map<ProductType, number>();
+const usedImages = new Set<string>();
+
+interface PooledImage {
+  url: string;
+  altText: string;
 }
 
 /**
- * Category image pools. Each entry is `{ id, alt }` where `alt` describes the
- * subject for screen readers — required, because the card renders the image
- * with an empty `alt` and the meaning lives in the product title.
+ * Claims the next unused image, preferring the city's own photographs.
+ *
+ * Skips over anything already claimed rather than trusting the cursor, because
+ * the hand-authored featured products register their images first and a city
+ * pool is not guaranteed to start where the cursor is.
  */
-const IMAGES = {
-  flight: [
-    { id: 'photo-1436491865332-7a61a109cc05', alt: 'Passenger aircraft above a cloud layer at dusk' },
-    { id: 'photo-1569154941061-e231b4725ef1', alt: 'Airliner cabin with a two-seat layout' },
-    { id: 'photo-1542296332-2e4473faf563', alt: 'Aircraft on approach over a coastal city' },
-  ],
-  hotel: [
-    { id: 'photo-1566073771259-6a8506099945', alt: 'Hotel exterior with a lit terrace and pool' },
-    { id: 'photo-1582719478250-c89cae4dc85b', alt: 'Hotel suite with a city view' },
-    { id: 'photo-1611892440504-42a792e24d32', alt: 'Boutique hotel room with warm evening light' },
-    { id: 'photo-1571896349842-33c89424de2d', alt: 'Lobby of a five-star hotel with marble floors' },
-  ],
-  cruise: [
-    { id: 'photo-1548574505-5e239809ee19', alt: 'Cruise ship at anchor in a calm sea' },
-    { id: 'photo-1530789253388-582c481c54b0', alt: 'River cruise vessel passing a wooded bank' },
-    { id: 'photo-1566847438217-76e82d383f84', alt: 'Harbour with a vessel preparing to depart' },
-  ],
-  guide: [
-    { id: 'photo-1552832230-c0197dd311b5', alt: 'Historic European city square with a cathedral' },
-    { id: 'photo-1499856871958-5b9627545d1a', alt: 'Old town street with a walking guide' },
-    { id: 'photo-1513635269975-59663e0ac1ad', alt: 'City skyline seen from a riverside bridge' },
-    { id: 'photo-1533929736458-ca588d08c8be', alt: 'Museum hall with classical architecture' },
-  ],
-  landmark: [
-    { id: 'photo-1564399579883-451a5d44ec08', alt: 'Monumental stone architecture against the sky' },
-    { id: 'photo-1529260830199-42c24126f198', alt: 'Grand museum hall with high ceilings' },
-    { id: 'photo-1569949381669-ecf31ae8e613', alt: 'Clock tower and civic building in bright daylight' },
-    { id: 'photo-1552832230-c0197dd311b5', alt: 'Historic plaza with a domed church' },
-  ],
-  activity: [
-    { id: 'photo-1469854523086-cc02fe5d8800', alt: 'Open road winding through mountain country' },
-    { id: 'photo-1506905925346-21bda4d32df4', alt: 'Mountain range under a clear sky' },
-    { id: 'photo-1502786129293-79981df4e689', alt: 'Vineyard terraces on a sunny hillside' },
-  ],
-} as const;
+function claimImage(type: ProductType, citySlug: string): PooledImage {
+  const preferCity = CITY_TOPICAL.includes(type);
 
-type ImageKey = keyof typeof IMAGES;
+  if (preferCity) {
+    const pool = CITY_IMAGES[citySlug] ?? [];
+    let cursor = cityCursor.get(citySlug) ?? 0;
+    while (cursor < pool.length && usedImages.has(pool[cursor].url)) cursor += 1;
+    if (cursor < pool.length) {
+      cityCursor.set(citySlug, cursor + 1);
+      usedImages.add(pool[cursor].url);
+      return pool[cursor];
+    }
+  }
 
-function media(city: CityDescriptor, key: ImageKey, seed: string, alt: { en: string; zh: string }) {
-  const pool = IMAGES[key];
-  const start = hash(seed) % pool.length;
-  return [
-    photo(pool[start].id, alt.en),
-    photo(pool[(start + 1) % pool.length].id, alt.en),
-  ];
+  const pool = PHOTO_POOLS[type];
+  let cursor = categoryCursor.get(type) ?? 0;
+  while (cursor < pool.length && usedImages.has(pool[cursor].url)) cursor += 1;
+  if (cursor >= pool.length) {
+    throw new Error(
+      `photo pool for ${type} is exhausted (${pool.length} images). ` +
+        'Re-run `npx tsx scripts/build-photo-pools.ts` before adding more products.',
+    );
+  }
+  categoryCursor.set(type, cursor + 1);
+  usedImages.add(pool[cursor].url);
+  return pool[cursor];
+}
+
+/** Registers an image as claimed without returning it (used by featured entries). */
+export function reserveImage(url: string): void {
+  usedImages.add(url);
+}
+
+/**
+ * Claims the next unused photograph of a city.
+ *
+ * Exported so the hand-authored products can be given a unique gallery before
+ * the generated catalogue is built: a duplicate slot there becomes a picture of
+ * the *right city* rather than a repeat of something else. Returns `undefined`
+ * when the city has no imagery left, which the caller must handle — a duplicate
+ * is never an acceptable fallback.
+ */
+export function takeCityImage(citySlug: string): PooledImage | undefined {
+  const pool = CITY_IMAGES[citySlug] ?? [];
+  let cursor = cityCursor.get(citySlug) ?? 0;
+  while (cursor < pool.length && usedImages.has(pool[cursor].url)) cursor += 1;
+  if (cursor >= pool.length) return undefined;
+  cityCursor.set(citySlug, cursor + 1);
+  usedImages.add(pool[cursor].url);
+  return pool[cursor];
+}
+
+/**
+ * How many listings of each category a city carries.
+ *
+ * Sized by **how big the city is as a destination**, not uniformly. A global
+ * capital should return a full page of things to do while a small spa town
+ * returns a handful — that is what the reference site's own city pages do, and
+ * a flat count makes every city feel equally thin.
+ *
+ * These numbers are also the **upper bound** on the catalogue: `claimImage`
+ * throws when a category pool runs out, because a wrapped-around photograph is
+ * exactly the duplication this whole mechanism exists to remove. Raise a count
+ * and `npx tsx scripts/build-photo-pools.ts` may need re-running first.
+ */
+export const LISTINGS_BY_TIER: Record<'A' | 'B' | 'C', Record<
+  'FLIGHT' | 'HOTEL_ROOM' | 'CRUISE' | 'GUIDED_TOUR' | 'ATTRACTION_TICKET' | 'ACTIVITY',
+  number
+>> = {
+  /** Global capitals — a full marketplace page per category. */
+  A: { FLIGHT: 6, HOTEL_ROOM: 16, CRUISE: 7, GUIDED_TOUR: 14, ATTRACTION_TICKET: 18, ACTIVITY: 20 },
+  /** Large destinations — enough to browse without repeating. */
+  B: { FLIGHT: 4, HOTEL_ROOM: 11, CRUISE: 5, GUIDED_TOUR: 10, ATTRACTION_TICKET: 12, ACTIVITY: 13 },
+  /** Everything else — a credible but modest inventory. */
+  C: { FLIGHT: 3, HOTEL_ROOM: 6, CRUISE: 3, GUIDED_TOUR: 6, ATTRACTION_TICKET: 8, ACTIVITY: 8 },
+};
+
+/**
+ * Which tier each city belongs to, spelled out rather than derived.
+ *
+ * `CITIES` is ordered by merchandising priority, so an index-based split is
+ * *possible* — but it would put Bath and Interlaken in the top tier and Tokyo in
+ * the bottom, because the array is grouped by region rather than by size. A
+ * wrong tier is invisible in a diff and obvious on the storefront, so the
+ * judgement is written down where it can be reviewed.
+ *
+ * Every city in `seed-cities.ts` must appear here; a missing one is a startup
+ * error rather than a silent downgrade to tier C.
+ */
+const CITY_TIER: Record<string, 'A' | 'B' | 'C'> = {
+  // Global capitals.
+  london: 'A',
+  paris: 'A',
+  rome: 'A',
+  'new-york': 'A',
+  tokyo: 'A',
+  barcelona: 'A',
+  // Large destinations.
+  edinburgh: 'B',
+  venice: 'B',
+  florence: 'B',
+  madrid: 'B',
+  amsterdam: 'B',
+  berlin: 'B',
+  lisbon: 'B',
+  'los-angeles': 'B',
+  'san-francisco': 'B',
+  'singapore-city': 'B',
+  sydney: 'B',
+  munich: 'B',
+  // Everything else.
+  bath: 'C',
+  nice: 'C',
+  lyon: 'C',
+  seville: 'C',
+  zurich: 'C',
+  interlaken: 'C',
+  vienna: 'C',
+  salzburg: 'C',
+  porto: 'C',
+  miami: 'C',
+  chicago: 'C',
+  'las-vegas': 'C',
+  toronto: 'C',
+  vancouver: 'C',
+  kyoto: 'C',
+  melbourne: 'C',
+};
+
+/**
+ * A distinguishing locale for the second and later listing of a category in one
+ * city. Real marketplaces do exactly this — a city's hotels are named for where
+ * they sit — so the variation reads as inventory, not as a template loop.
+ *
+ * Long enough for the largest tier: the biggest category in the biggest city is
+ * 20 listings, and a shorter list would start repeating names from a wrapped
+ * index.
+ */
+const SETTINGS: Record<'en' | 'zh', readonly string[]> = {
+  en: [
+    'Riverside', 'Old Town', 'Garden Wing', 'Upper Quarter', 'Harbour Side',
+    'Museum Quarter', 'Cathedral District', 'Market Square', 'Riverside Walk',
+    'Hilltop', 'Laneway', 'Central Station', 'Arts District', 'West Gate',
+    'North Quarter', 'Park Side', 'Embankment', 'Courtyard', 'Bell Tower',
+    'Terrace',
+  ],
+  zh: [
+    '河畔', '老城', '花园翼', '上城', '港湾',
+    '博物馆区', '主教座堂区', '市集广场', '滨河步道',
+    '山丘', '窄巷', '中央车站', '艺术区', '西城门',
+    '北城', '公园侧', '堤岸', '庭院', '钟楼',
+    '露台',
+  ],
+};
+
+function settingFor(ordinal: number, lang: 'en' | 'zh'): string {
+  return SETTINGS[lang][(ordinal - 1) % SETTINGS[lang].length];
+}
+
+/**
+ * Sailing months, so several cruises out of one city are distinguishable.
+ *
+ * A cruise is a *dated* departure, so the month is the natural second axis; the
+ * night count sits in a five-value band and repeated long before the seventh
+ * cruise.
+ */
+const CRUISE_MONTHS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+] as const;
+
+const CRUISE_MONTHS_ZH = [
+  '1月', '2月', '3月', '4月', '5月', '6月',
+  '7月', '8月', '9月', '10月', '11月', '12月',
+] as const;
+
+/**
+ * Picks from a list, guaranteed distinct for ordinals below its length.
+ *
+ * `pick()` alone cannot do this: hashing `hotel:paris:0` and `hotel:paris:1`
+ * independently lands on the same entry often enough to matter — all three Paris
+ * hotels were named "Paris Palace — Premier Suite" for exactly this reason.
+ *
+ * The `seed` must therefore be **per city, not per listing**: offsetting a
+ * *fixed* base by the ordinal is a rotation, which cannot collide. Offsetting a
+ * seed that already contains the ordinal is three independent hashes, which can.
+ */
+function pickDistinct<T>(list: readonly T[], seed: string, ordinal: number): T {
+  return list[(hash(seed) + ordinal) % list.length];
+}
+
+/** Slug and ticket-code suffix. `0` keeps the original identifier stable. */
+function suffix(ordinal: number): string {
+  return ordinal === 0 ? '' : `-${ordinal + 1}`;
+}
+
+/**
+ * The single image a generated product carries.
+ *
+ * One image, not a gallery — see `claimImage`. The `alt` text is authored per
+ * category below rather than read off the file name, because a Commons file name
+ * is a catalogue key, not a sentence.
+ */
+function media(city: CityDescriptor, type: ProductType): { url: string; altText: string }[] {
+  return [claimImage(type, city.slug)];
 }
 
 // ---------------------------------------------------------------------------
@@ -268,9 +457,31 @@ const HUBS: Record<string, string[]> = {
   AU: ['LHR', 'CDG', 'SIN', 'DXB', 'JFK'],
 };
 
+/**
+ * Cabin names for a flight listing.
+ *
+ * **At least as many entries as the largest number of flights one city carries**
+ * (six). The name is built from this list, so a shorter list wraps and produces
+ * two identically named flights in the same city — the exact defect this list is
+ * sized against. Adding flights to a tier means adding templates here too.
+ */
 const FLIGHT_NAMES: Record<'en' | 'zh', string[]> = {
-  en: ['Business Class to {hub}', 'Premium Economy to {hub}', 'First Class Suite to {hub}'],
-  zh: ['飞往{hub}的商务舱', '飞往{hub}的超级经济舱', '飞往{hub}的头等舱套房'],
+  en: [
+    'Business Class to {hub}',
+    'Premium Economy to {hub}',
+    'First Class Suite to {hub}',
+    'Business Class, overnight to {hub}',
+    'Premium Economy, daytime to {hub}',
+    'First Class Suite with lounge to {hub}',
+  ],
+  zh: [
+    '飞往{hub}的商务舱',
+    '飞往{hub}的超级经济舱',
+    '飞往{hub}的头等舱套房',
+    '飞往{hub}的商务舱（夜航）',
+    '飞往{hub}的超级经济舱（日间航班）',
+    '飞往{hub}的头等舱套房（含贵宾室）',
+  ],
 };
 
 /** Replaces a `{token}` in a template. */
@@ -324,12 +535,27 @@ export function setAirportsByCity(index: AirportIndex): void {
   AIRPORTS_BY_CITY = index;
 }
 
-function flightProduct(city: CityDescriptor): SeedProduct {
-  const seed = `flight:${city.slug}`;
+function flightProduct(city: CityDescriptor, ordinal = 0): SeedProduct {
+  // Two seeds on purpose: `seed` is per *listing* (coordinates, connection
+  // choice, and the `-2` slug suffix), `family` is per *city* where a value has
+  // to differ between the city's listings. See `pickDistinct`.
+  const family = `flight:${city.slug}`;
+  const seed = `${family}:${ordinal}`;
   const country = (city.slug.match(/-([a-z]{2})$/) ? city.slug.slice(-2) : 'GB').toUpperCase();
   const carriers = FLIGHT_CARRIERS[country] ?? ['Emirates'];
-  const airline = pick(carriers, seed);
-  const hub = pick(HUBS[country] ?? ['SIN'], seed + 'hub');
+  const airline = pickDistinct(carriers, family + 'carrier', ordinal);
+
+  /**
+   * The arrival hub rotates on a **second, slower axis** than the carrier.
+   *
+   * Rotating both on the ordinal would give `n` distinct pairs only when the two
+   * lists are coprime; rotating the hub once per full carrier cycle gives
+   * `carriers × hubs` distinct pairs, which is what keeps six flights out of one
+   * city from repeating a name. `pickDistinct` documents the failure this
+   * avoids.
+   */
+  const hubs = HUBS[country] ?? ['SIN'];
+  const hub = hubs[(hash(family + 'hub') + Math.floor(ordinal / carriers.length)) % hubs.length];
 
   /**
    * Departure airport, derived from real geography.
@@ -391,12 +617,12 @@ function flightProduct(city: CityDescriptor): SeedProduct {
     origin !== CONNECT_HUB &&
     destination !== CONNECT_HUB;
   const route = connects ? `${origin} → ${CONNECT_HUB} → ${destination}` : `${origin} → ${destination}`;
-  const cabinLabel = fill(pick(FLIGHT_NAMES.en, seed), { hub: destination, city: city.name });
-  const cabinLabelZh = fill(pick(FLIGHT_NAMES.zh, seed), { hub: destination, city: city.nameZh });
+  const cabinLabel = fill(pickDistinct(FLIGHT_NAMES.en, family, ordinal), { hub: destination });
+  const cabinLabelZh = fill(pickDistinct(FLIGHT_NAMES.zh, family, ordinal), { hub: destination });
   const { lat, lng } = offset(city, seed);
 
   // Business is the headline fare — that is the segment a premium agency sells.
-  const business = variant(`${city.slug.toUpperCase()}-FL-BIZ`, 2450, city.currency, {
+  const business = variant(`${city.slug.toUpperCase()}-FL-BIZ${suffix(ordinal)}`, 2450, city.currency, {
     name: 'Business class',
     description: 'Lie-flat seat with direct aisle access, two-piece service and lounge access.',
     capacity: 12,
@@ -404,13 +630,13 @@ function flightProduct(city: CityDescriptor): SeedProduct {
     maxPerOrder: 9,
     timeSlots: ['Departure 21:40', 'Departure 23:15'],
   });
-  const premium = variant(`${city.slug.toUpperCase()}-FL-PREM`, 1180, city.currency, {
+  const premium = variant(`${city.slug.toUpperCase()}-FL-PREM${suffix(ordinal)}`, 1180, city.currency, {
     name: 'Premium economy',
     description: 'Wider seat with extra legroom, power and a generous allowance.',
     capacity: 24,
     timeSlots: ['Departure 21:40'],
   });
-  const first = variant(`${city.slug.toUpperCase()}-FL-FIRST`, 6100, city.currency, {
+  const first = variant(`${city.slug.toUpperCase()}-FL-FIRST${suffix(ordinal)}`, 6100, city.currency, {
     name: 'First class suite',
     description: 'Private suite with a closing door and direct access to the onboard bar.',
     capacity: 4,
@@ -419,7 +645,7 @@ function flightProduct(city: CityDescriptor): SeedProduct {
   });
 
   return {
-    slug: `${city.slug}-international-flight`,
+    slug: `${city.slug}-international-flight${suffix(ordinal)}`,
     name: `${cabinLabel} on ${airline}`,
     type: 'FLIGHT',
     fulfillment: 'INSTANT_TICKET',
@@ -449,10 +675,7 @@ function flightProduct(city: CityDescriptor): SeedProduct {
     skipTheLine: false,
     ticketOnly: true,
     tags: ['business-class', 'long-haul', 'lounge-access', 'lie-flat', 'airline'],
-    media: media(city, 'flight', seed, {
-      en: `${airline} aircraft and a lie-flat business cabin`,
-      zh: `${airline} 的飞机与平躺商务舱`,
-    }),
+    media: media(city, 'FLIGHT'),
     airlineName: airline,
     flightRoute: route,
     cabinClass: 'Business',
@@ -496,27 +719,34 @@ const HOTEL_NAMES: Record<'en' | 'zh', string[]> = {
   ],
 };
 
-function hotelProduct(city: CityDescriptor): SeedProduct {
-  const seed = `hotel:${city.slug}`;
+function hotelProduct(city: CityDescriptor, ordinal = 0): SeedProduct {
+  // `family` is per city so the four name templates rotate rather than collide;
+  // `seed` is per listing. See `pickDistinct`.
+  const family = `hotel:${city.slug}`;
+  const seed = `${family}:${ordinal}`;
   const { lat, lng } = offset(city, seed);
   const stars = between(seed + 'stars', 4, 5);
-  const brandName = fill(pick(HOTEL_NAMES.en, seed), { city: city.name });
-  const brandNameZh = fill(pick(HOTEL_NAMES.zh, seed), { city: city.nameZh });
+  const brandName = fill(pickDistinct(HOTEL_NAMES.en, family, ordinal), { city: city.name });
+  const brandNameZh = fill(pickDistinct(HOTEL_NAMES.zh, family, ordinal), { city: city.nameZh });
+  // The 2nd and 3rd property in a city is distinguished by where it sits, the
+  // way a real listing is — otherwise three Paris hotels would share one name.
+  const setting = ordinal === 0 ? '' : settingFor(ordinal, 'en');
+  const settingZh = ordinal === 0 ? '' : settingFor(ordinal, 'zh');
 
-  const suite = variant(`${city.slug.toUpperCase()}-HT-SUITE`, 780, city.currency, {
+  const suite = variant(`${city.slug.toUpperCase()}-HT-SUITE${suffix(ordinal)}`, 780, city.currency, {
     name: 'Deluxe suite',
     description: 'A corner suite with separate living space and a city or garden outlook.',
     inventoryMode: 'PER_NIGHT',
     capacity: 6,
     maxPerOrder: 4,
   });
-  const deluxe = variant(`${city.slug.toUpperCase()}-HT-DELUXE`, 420, city.currency, {
+  const deluxe = variant(`${city.slug.toUpperCase()}-HT-DELUXE${suffix(ordinal)}`, 420, city.currency, {
     name: 'Deluxe room',
     description: 'A king or twin room with a work desk and blackout curtains.',
     inventoryMode: 'PER_NIGHT',
     capacity: 18,
   });
-  const penthouse = variant(`${city.slug.toUpperCase()}-HT-PENT`, 2450, city.currency, {
+  const penthouse = variant(`${city.slug.toUpperCase()}-HT-PENT${suffix(ordinal)}`, 2450, city.currency, {
     name: 'Panoramic penthouse',
     description: 'The top floor, with a private terrace and a dedicated host.',
     inventoryMode: 'PER_NIGHT',
@@ -525,8 +755,13 @@ function hotelProduct(city: CityDescriptor): SeedProduct {
   });
 
   return {
-    slug: `${city.slug}-luxury-hotel`,
-    name: `${brandName} — ${city.name}`,
+    slug: `${city.slug}-luxury-hotel${suffix(ordinal)}`,
+    // The name template already embeds the city ("Residences London — Executive
+    // Apartment"), so appending it again produced titles that read like machine
+    // output: "Residences London — Executive Apartment — London, Riverside".
+    // The setting is the part that actually distinguishes two properties in one
+    // city, so it is the only suffix.
+    name: setting ? `${brandName}, ${setting}` : brandName,
     type: 'HOTEL_ROOM',
     fulfillment: 'INSTANT_TICKET',
     destinationSlug: city.slug,
@@ -554,15 +789,12 @@ function hotelProduct(city: CityDescriptor): SeedProduct {
     freeCancellation: true,
     wheelchairAccessible: true,
     tags: ['five-star', 'suite', 'breakfast-included', 'spa', 'concierge'],
-    media: media(city, 'hotel', seed, {
-      en: `The exterior and a suite at our five-star partner in ${city.name}`,
-      zh: `${city.nameZh}合作五星酒店外观与套房内景`,
-    }),
+    media: media(city, 'HOTEL_ROOM'),
     roomCategory: 'Deluxe suite',
     starCategory: stars,
     boardBasis: 'Breakfast and evening canapés included',
     translations: [
-      { locale: 'zh', name: `${brandNameZh} · ${city.nameZh}`, summary: `${city.nameZh}核心地段五星酒店，{city.signature.zh}。套房空间宽敞，含早餐与晚间酒会，并提供礼宾服务。` },
+      { locale: 'zh', name: settingZh ? `${brandNameZh} · ${settingZh}` : brandNameZh, summary: `${city.nameZh}核心地段五星酒店，{city.signature.zh}。套房空间宽敞，含早餐与晚间酒会，并提供礼宾服务。` },
     ],
     ticketTypes: [suite, deluxe, penthouse],
     cancellationPolicy: {
@@ -617,34 +849,47 @@ const SHIPS: Record<string, { line: string; lineZh: string; ship: string; shipZh
   AU: [{ line: 'Viking', lineZh: '维京邮轮', ship: 'Viking海口号', shipZh: 'Viking海口号' }],
 };
 
-function cruiseProduct(city: CityDescriptor): SeedProduct {
-  const seed = `cruise:${city.slug}`;
+function cruiseProduct(city: CityDescriptor, ordinal = 0): SeedProduct {
+  const family = `cruise:${city.slug}`;
+  const seed = `${family}:${ordinal}`;
   const country = city.slug.slice(-2).toUpperCase();
   const { lat, lng } = offset(city, seed);
 
   const river = RIVERS[country];
   const vessels = SHIPS[country] ?? [{ line: 'Viking', lineZh: '维京邮轮', ship: 'Viking Star', shipZh: '维京星辰号' }];
-  const vessel = pick(vessels, seed);
+  const vessel = pickDistinct(vessels, family, ordinal);
 
   const isRiver = Boolean(river);
-  const nights = between(seed + 'nights', isRiver ? 5 : 7, isRiver ? 7 : 11);
+  // Nights are drawn from a narrow band so the product reads as a real sailing,
+  // which means the band alone cannot distinguish seven cruises from one city.
+  // A departure month is the genuine second axis — a cruise *is* a dated
+  // departure — and it is what keeps the names apart.
+  const nights = between(seed + 'nights', isRiver ? 5 : 7, isRiver ? 7 : 11) + (ordinal % 2);
+  // The month rotates on a **per-city** base, not a per-listing one. Hashing the
+  // per-listing seed made both axes effectively random, so two sailings out of
+  // the same city could land on the same night count *and* the same month and
+  // read as duplicates. A fixed base plus the ordinal is a strict rotation:
+  // distinct months for the first twelve sailings, which covers every tier.
+  const monthIndex = (hash(family + 'month') + ordinal) % CRUISE_MONTHS.length;
+  const month = CRUISE_MONTHS[monthIndex];
+  const monthZh = CRUISE_MONTHS_ZH[monthIndex];
   const ports = river ? river.ports : [city.name, 'a fjord', 'a Mediterranean port', 'a wine island', 'Monaco', 'Barcelona'];
   const portsZh = river ? river.portsZh : [city.nameZh, '峡湾', '地中海港口', '葡萄酒岛', '摩纳哥', '巴塞罗那'];
 
-  const suite = variant(`${city.slug.toUpperCase()}-CR-SUITE`, 5900, city.currency, {
+  const suite = variant(`${city.slug.toUpperCase()}-CR-SUITE${suffix(ordinal)}`, 5900, city.currency, {
     name: 'Veranda suite',
     description: 'A private veranda with sliding glass doors, in the mid or forward section.',
     inventoryMode: 'PER_DATE',
     capacity: 8,
     maxPerOrder: 2,
   });
-  const deluxe = variant(`${city.slug.toUpperCase()}-CR-DELUXE`, 3400, city.currency, {
+  const deluxe = variant(`${city.slug.toUpperCase()}-CR-DELUXE${suffix(ordinal)}`, 3400, city.currency, {
     name: 'Deluxe cabin',
     description: 'A larger-than-average cabin with a window and a sitting area.',
     inventoryMode: 'PER_DATE',
     capacity: 20,
   });
-  const balcony = variant(`${city.slug.toUpperCase()}-CR-BALC`, 2150, city.currency, {
+  const balcony = variant(`${city.slug.toUpperCase()}-CR-BALC${suffix(ordinal)}`, 2150, city.currency, {
     name: 'Balcony cabin',
     description: 'A French balcony and a queen or twin configuration.',
     inventoryMode: 'PER_DATE',
@@ -652,10 +897,10 @@ function cruiseProduct(city: CityDescriptor): SeedProduct {
   });
 
   return {
-    slug: `${city.slug}-signature-cruise`,
+    slug: `${city.slug}-signature-cruise${suffix(ordinal)}`,
     name: isRiver
-      ? `${nights}-night river cruise on ${river!.name}`
-      : `${nights}-night ${vessel.ship} cruise from ${city.name}`,
+      ? `${nights}-night river cruise on ${river!.name}, ${month} departure`
+      : `${nights}-night ${vessel.ship} cruise from ${city.name}, ${month} departure`,
     type: 'CRUISE',
     fulfillment: 'INSTANT_TICKET',
     destinationSlug: city.slug,
@@ -693,10 +938,7 @@ function cruiseProduct(city: CityDescriptor): SeedProduct {
     freeCancellation: true,
     wheelchairAccessible: true,
     tags: ['all-suite', 'all-inclusive', 'small-ship', 'verified', 'scenic'],
-    media: media(city, 'cruise', seed, {
-      en: `${vessel.ship} under way${isRiver ? ` on ${river!.name}` : ''}`,
-      zh: `${vessel.shipZh}航行中`,
-    }),
+    media: media(city, 'CRUISE'),
     cruiseLine: vessel.line,
     shipName: vessel.ship,
     cruiseNights: nights,
@@ -704,7 +946,9 @@ function cruiseProduct(city: CityDescriptor): SeedProduct {
     translations: [
       {
         locale: 'zh',
-        name: isRiver ? `${river!.nameZh}${nights}晚内河 cruise` : `${vessel.shipZh}·${city.nameZh}出发${nights}晚邮轮`,
+        name: isRiver
+          ? `${river!.nameZh}${nights}晚内河游轮（${monthZh}启航）`
+          : `${vessel.shipZh}·${city.nameZh}出发${nights}晚邮轮（${monthZh}启航）`,
         summary: isRiver
           ? `${vessel.lineZh}${river!.nameZh}${nights}晚全套房内河游轮。每一间舱房均带独立阳台，靠岸即有专属导览，酒水全部包含。`
           : `${vessel.shipZh}（${vessel.lineZh}）自${city.nameZh}出发的${nights}晚航次。全套房配私人阳台，甲板全程服务，餐饮、酒水与岸上观光全部包含。`,
@@ -733,23 +977,23 @@ function cruiseProduct(city: CityDescriptor): SeedProduct {
 // 4. Private guides
 // ---------------------------------------------------------------------------
 
-function guideProduct(city: CityDescriptor): SeedProduct {
-  const seed = `guide:${city.slug}`;
+function guideProduct(city: CityDescriptor, ordinal = 0): SeedProduct {
+  const seed = `guide:${city.slug}:${ordinal}`;
   const { lat, lng } = offset(city, seed);
 
-  const halfDay = variant(`${city.slug.toUpperCase()}-GU-HALF`, 145, city.currency, {
+  const halfDay = variant(`${city.slug.toUpperCase()}-GU-HALF${suffix(ordinal)}`, 145, city.currency, {
     name: 'Half-day private walk',
     description: 'Three and a half hours with a historian-guide, at your pace.',
     capacity: 6,
     timeSlots: ['09:30', '14:30'],
   });
-  const fullDay = variant(`${city.slug.toUpperCase()}-GU-DAY`, 285, city.currency, {
+  const fullDay = variant(`${city.slug.toUpperCase()}-GU-DAY${suffix(ordinal)}`, 285, city.currency, {
     name: 'Full-day private guide',
     description: 'A whole day with the guide, including a table booked for lunch.',
     capacity: 6,
     timeSlots: ['09:00'],
   });
-  const dayTrip = variant(`${city.slug.toUpperCase()}-GU-TRIP`, 470, city.currency, {
+  const dayTrip = variant(`${city.slug.toUpperCase()}-GU-TRIP${suffix(ordinal)}`, 470, city.currency, {
     name: 'Beyond the city, full day',
     description: 'A day trip into the surrounding countryside or coast with a driver-guide.',
     capacity: 4,
@@ -757,8 +1001,10 @@ function guideProduct(city: CityDescriptor): SeedProduct {
   });
 
   return {
-    slug: `${city.slug}-private-guide`,
-    name: `A day in ${city.name} with a private guide`,
+    slug: `${city.slug}-private-guide${suffix(ordinal)}`,
+    name: ordinal === 0
+      ? `A day in ${city.name} with a private guide`
+      : `Private guide in ${city.name}: the ${settingFor(ordinal, 'en')} walk`,
     type: 'GUIDED_TOUR',
     destinationSlug: city.slug,
     latitude: lat,
@@ -787,12 +1033,9 @@ function guideProduct(city: CityDescriptor): SeedProduct {
     groupSizeCap: 6,
     privateDeparture: true,
     tags: ['private', 'historian', 'flexible', 'locally-led', 'architecture'],
-    media: media(city, 'guide', seed, {
-      en: `The historic centre of ${city.name}, where your guide meets you`,
-      zh: `${city.nameZh}老城，向导与您会合之处`,
-    }),
+    media: media(city, 'GUIDED_TOUR'),
     translations: [
-      { locale: 'zh', name: `${city.nameZh}私享向导一日`, summary: `由定居${city.nameZh}的历史学者或建筑背景向导带您深度认识这座城市：{city.signature.zh}。私家成行、不赶行程，可按您的节奏随时调整，并可代订当地餐厅。` },
+      { locale: 'zh', name: ordinal === 0 ? `${city.nameZh}私享向导一日` : `${city.nameZh}私家向导 · ${settingFor(ordinal, 'zh')}线路`, summary: `由定居${city.nameZh}的历史学者或建筑背景向导带您深度认识这座城市：{city.signature.zh}。私家成行、不赶行程，可按您的节奏随时调整，并可代订当地餐厅。` },
     ],
     ticketTypes: [halfDay, fullDay, dayTrip],
     cancellationPolicy: {
@@ -816,29 +1059,31 @@ function guideProduct(city: CityDescriptor): SeedProduct {
 // 5. Landmark access
 // ---------------------------------------------------------------------------
 
-function landmarkProduct(city: CityDescriptor): SeedProduct {
-  const seed = `landmark:${city.slug}`;
+function landmarkProduct(city: CityDescriptor, ordinal = 0): SeedProduct {
+  const seed = `landmark:${city.slug}:${ordinal}`;
   const { lat, lng } = offset(city, seed);
 
-  const morning = variant(`${city.slug.toUpperCase()}-LM-AM`, 48, city.currency, {
+  const morning = variant(`${city.slug.toUpperCase()}-LM-AM${suffix(ordinal)}`, 48, city.currency, {
     name: 'Entry from opening',
     description: 'Enter as the doors open, before the main arrivals.',
     capacity: 120,
   });
-  const timed = variant(`${city.slug.toUpperCase()}-LM-TIMED`, 62, city.currency, {
+  const timed = variant(`${city.slug.toUpperCase()}-LM-TIMED${suffix(ordinal)}`, 62, city.currency, {
     name: 'Timed entry',
     description: 'A reserved slot; you go straight in when you arrive.',
     capacity: 80,
   });
-  const withGuide = variant(`${city.slug.toUpperCase()}-LM-GUIDED`, 145, city.currency, {
+  const withGuide = variant(`${city.slug.toUpperCase()}-LM-GUIDED${suffix(ordinal)}`, 145, city.currency, {
     name: 'Entry with a guide',
     description: 'Skip-the-line entry plus one hour with a museum specialist.',
     capacity: 20,
   });
 
   return {
-    slug: `${city.slug}-landmark-access`,
-    name: `Signature landmark of ${city.name} — reserved entry`,
+    slug: `${city.slug}-landmark-access${suffix(ordinal)}`,
+    name: ordinal === 0
+      ? `Signature landmark of ${city.name} — reserved entry`
+      : `Landmark of ${city.name}: ${settingFor(ordinal, 'en')} entry`,
     type: 'ATTRACTION_TICKET',
     destinationSlug: city.slug,
     latitude: lat,
@@ -866,12 +1111,9 @@ function landmarkProduct(city: CityDescriptor): SeedProduct {
     wheelchairAccessible: true,
     durationMinutes: 120,
     tags: ['landmark', 'priority-entry', 'audio-guide', 'iconic'],
-    media: media(city, 'landmark', seed, {
-      en: `The signature landmark of ${city.name}`,
-      zh: `${city.nameZh}的标志性地标`,
-    }),
+    media: media(city, 'ATTRACTION_TICKET'),
     translations: [
-      { locale: 'zh', name: `${city.nameZh}地标 · 优先入场`, summary: `${city.nameZh}最具代表性之处的优先入场券：{city.signature.zh}。手机出示电子票即可入场，无需排队，并附九语种语音导览。` },
+      { locale: 'zh', name: ordinal === 0 ? `${city.nameZh}地标 · 优先入场` : `${city.nameZh}地标 · ${settingFor(ordinal, 'zh')}入场`, summary: `${city.nameZh}最具代表性之处的优先入场券：{city.signature.zh}。手机出示电子票即可入场，无需排队，并附九语种语音导览。` },
     ],
     ticketTypes: [morning, timed, withGuide],
     cancellationPolicy: {
@@ -895,24 +1137,24 @@ function landmarkProduct(city: CityDescriptor): SeedProduct {
 // 6. Signature activities
 // ---------------------------------------------------------------------------
 
-function activityProduct(city: CityDescriptor): SeedProduct {
-  const seed = `activity:${city.slug}`;
+function activityProduct(city: CityDescriptor, ordinal = 0): SeedProduct {
+  const seed = `activity:${city.slug}:${ordinal}`;
   const { lat, lng } = offset(city, seed);
 
-  const smallGroup = variant(`${city.slug.toUpperCase()}-AC-SMALL`, 118, city.currency, {
+  const smallGroup = variant(`${city.slug.toUpperCase()}-AC-SMALL${suffix(ordinal)}`, 118, city.currency, {
     name: 'Small group, six guests',
     description: 'Six guests maximum, with two local specialists.',
     capacity: 6,
     timeSlots: ['09:00', '15:00'],
   });
-  const privateVersion = variant(`${city.slug.toUpperCase()}-AC-PRIV`, 460, city.currency, {
+  const privateVersion = variant(`${city.slug.toUpperCase()}-AC-PRIV${suffix(ordinal)}`, 460, city.currency, {
     name: 'Private departure',
     description: 'The same day, reserved entirely for your party.',
     capacity: 8,
     maxPerOrder: 8,
     timeSlots: ['09:00', '13:00', '15:00'],
   });
-  const extended = variant(`${city.slug.toUpperCase()}-AC-FULL`, 240, city.currency, {
+  const extended = variant(`${city.slug.toUpperCase()}-AC-FULL${suffix(ordinal)}`, 240, city.currency, {
     name: 'Extended, with lunch',
     description: 'A full day including a reserved lunch and tasting.',
     capacity: 8,
@@ -920,8 +1162,10 @@ function activityProduct(city: CityDescriptor): SeedProduct {
   });
 
   return {
-    slug: `${city.slug}-signature-activity`,
-    name: `The best of ${city.name}, done properly`,
+    slug: `${city.slug}-signature-activity${suffix(ordinal)}`,
+    name: ordinal === 0
+      ? `The best of ${city.name}, done properly`
+      : `${city.name} by ${settingFor(ordinal, 'en')}: a small-group day`,
     type: 'ACTIVITY',
     destinationSlug: city.slug,
     latitude: lat,
@@ -950,12 +1194,9 @@ function activityProduct(city: CityDescriptor): SeedProduct {
     groupSizeCap: 6,
     privateDeparture: true,
     tags: ['small-group', 'local-specialist', 'lunch-included', 'private-option'],
-    media: media(city, 'activity', seed, {
-      en: `The landscape and coast around ${city.name}`,
-      zh: `${city.nameZh}周边的海岸与风景`,
-    }),
+    media: media(city, 'ACTIVITY'),
     translations: [
-      { locale: 'zh', name: `${city.nameZh}精选一日体验`, summary: `${city.nameZh}值得专程一访的一天：{city.signature.zh}。最多六位客人，两位本地专家全程陪同，含专车接送与预留午餐，亦可升级为私家专属行程。` },
+      { locale: 'zh', name: ordinal === 0 ? `${city.nameZh}精选一日体验` : `${city.nameZh}精选一日 · ${settingFor(ordinal, 'zh')}`, summary: `${city.nameZh}值得专程一访的一天：{city.signature.zh}。最多六位客人，两位本地专家全程陪同，含专车接送与预留午餐，亦可升级为私家专属行程。` },
     ],
     ticketTypes: [smallGroup, privateVersion, extended],
     cancellationPolicy: {
@@ -979,7 +1220,14 @@ function activityProduct(city: CityDescriptor): SeedProduct {
 // Assembly
 // ---------------------------------------------------------------------------
 
-const FACTORIES = [flightProduct, hotelProduct, cruiseProduct, guideProduct, landmarkProduct, activityProduct] as const;
+const LISTINGS: { type: keyof typeof PER_CITY_LISTINGS; factory: (city: CityDescriptor, ordinal?: number) => SeedProduct }[] = [
+  { type: 'FLIGHT', factory: flightProduct },
+  { type: 'HOTEL_ROOM', factory: hotelProduct },
+  { type: 'CRUISE', factory: cruiseProduct },
+  { type: 'GUIDED_TOUR', factory: guideProduct },
+  { type: 'ATTRACTION_TICKET', factory: landmarkProduct },
+  { type: 'ACTIVITY', factory: activityProduct },
+];
 
 /** Fills a `{city.signature}` placeholder in the hand-written copy. */
 function interpolate(template: string, city: CityDescriptor, lang: 'en' | 'zh'): string {
@@ -989,29 +1237,38 @@ function interpolate(template: string, city: CityDescriptor, lang: 'en' | 'zh'):
 }
 
 /**
- * Builds the full catalogue: six products per city, all bilingual.
+ * Builds the full catalogue, bilingual and uniquely illustrated.
  *
  * Exported rather than inlined so `seed-products.ts` can compose it with the
- * hand-authored New York entries if needed; in practice it is the whole list.
+ * hand-authored entries; in practice it is the whole generated list.
  */
 export function buildGlobalProducts(): SeedProduct[] {
   const products: SeedProduct[] = [];
 
   for (const city of CITIES) {
-    for (const factory of FACTORIES) {
-      const product = factory(city);
+    const tier = CITY_TIER[city.slug];
+    if (!tier) {
+      // A city with no tier would be silently built at zero listings, which
+      // looks like "this destination is empty" rather than "someone forgot".
+      throw new Error(`no tier for city "${city.slug}" in CITY_TIER (seed-global.ts)`);
+    }
 
-      // Interpolation is applied last, so the templates above can mention the
-      // city signature without every factory threading it through by hand.
-      product.summary = interpolate(product.summary, city, 'en');
-      product.description = interpolate(product.description, city, 'en');
-      for (const translation of product.translations ?? []) {
-        if (translation.locale === 'zh') {
-          translation.summary = interpolate(translation.summary, city, 'zh');
+    for (const { type, factory } of LISTINGS) {
+      for (let ordinal = 0; ordinal < LISTINGS_BY_TIER[tier][type]; ordinal += 1) {
+        const product = factory(city, ordinal);
+
+        // Interpolation is applied last, so the templates above can mention the
+        // city signature without every factory threading it through by hand.
+        product.summary = interpolate(product.summary, city, 'en');
+        product.description = interpolate(product.description, city, 'en');
+        for (const translation of product.translations ?? []) {
+          if (translation.locale === 'zh') {
+            translation.summary = interpolate(translation.summary, city, 'zh');
+          }
         }
-      }
 
-      products.push(product);
+        products.push(product);
+      }
     }
   }
 

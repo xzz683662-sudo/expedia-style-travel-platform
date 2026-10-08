@@ -5,7 +5,8 @@
  *
  * Fails loudly (exit 1) on any invariant violation, so it can gate a commit:
  *   - every product resolves to a destination that exists in the seed
- *   - every product has a Chinese translation and at least two photos
+ *   - every product has a Chinese translation and at least one photo, and no
+ *     two products share a photo
  *   - every city carries the six headline categories
  *   - no duplicate slugs or ticket-type codes
  *   - prices are plausible for their currency (no zero-decimal currency priced
@@ -61,6 +62,17 @@ const merchantSlugs = new Set(MERCHANTS.map((m) => m.slug));
 // --- global invariants -----------------------------------------------------
 const slugs = new Set<string>();
 const codes = new Set<string>();
+/** Photograph URL -> the product that first claimed it. */
+const photoOwner = new Map<string, string>();
+/** Reset per product, to catch a gallery repeating one of its own frames. */
+const seenInProduct = new Set<string>();
+/**
+ * "<city>|<type>" -> the names used, so two listings in one city cannot present
+ * the same name. The generator rotates name templates, and a rotation shorter
+ * than a tier's listing count silently produced identical titles — three Paris
+ * hotels all called "Paris Palace — Premier Suite".
+ */
+const namesPerCityType = new Map<string, Set<string>>();
 
 for (const p of PRODUCTS as SeedProduct[]) {
   if (slugs.has(p.slug)) issues.push(`duplicate product slug: ${p.slug}`);
@@ -75,13 +87,38 @@ for (const p of PRODUCTS as SeedProduct[]) {
   if (!p.name) issues.push(`${p.slug}: missing display name`);
   if (!/^[a-z0-9-]+$/.test(p.slug)) issues.push(`${p.slug}: slug must be kebab-case`);
 
+  const nameKey = `${p.destinationSlug}|${p.type}`;
+  const seenNames = namesPerCityType.get(nameKey) ?? new Set<string>();
+  if (seenNames.has(p.name)) issues.push(`${p.slug}: duplicate name "${p.name}" in ${nameKey}`);
+  seenNames.add(p.name);
+  namesPerCityType.set(nameKey, seenNames);
+
   const hasZh = (p.translations ?? []).some((t) => t.locale === 'zh');
   if (!hasZh) issues.push(`${p.slug}: missing zh translation`);
 
-  if (p.media.length < 2) issues.push(`${p.slug}: needs at least two photos`);
+  /**
+   * One photo is the intended shape, not a shortfall.
+   *
+   * A generated product carries a single image because the pool of genuinely
+   * distinct, correctly-licensed photographs is bounded and the seed refuses to
+   * reuse one — see `claimImage`. Two photos that repeat something else is the
+   * defect this replaced, so the floor is *one*, and the invariant that matters
+   * is the cross-product uniqueness checked below.
+   */
+  if (p.media.length < 1) issues.push(`${p.slug}: needs at least one photo`);
   for (const m of p.media) {
     if (!m.url.startsWith('https://')) issues.push(`${p.slug}: non-https media url`);
+    if (photoOwner.has(m.url)) {
+      issues.push(`photo shared by ${photoOwner.get(m.url)} and ${p.slug}: ${m.url.slice(-48)}`);
+    } else {
+      photoOwner.set(m.url, p.slug);
+    }
+    // A product repeating its own frame is the same defect one level down: two
+    // identical thumbnails sit side by side in the gallery.
+    if (seenInProduct.has(m.url)) issues.push(`${p.slug}: repeats its own photo`);
+    seenInProduct.add(m.url);
   }
+  seenInProduct.clear();
 
   // Two variants is a legitimate shape (a standard and a concession rate, or a
 // day and an evening sailing), so the floor is two rather than three.

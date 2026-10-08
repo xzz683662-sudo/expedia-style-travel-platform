@@ -152,16 +152,18 @@ function roomTypesFor(product: Product): Json[] {
  * legs it actually names, with the layover spelled out — this is what makes
  * connection search answerable instead of always empty.
  *
- * Times are only emitted when {@link CONNECTING_ITINERARIES} supplies them.
- * Inventing a departure time from a departure date would put a fabricated
- * schedule in front of a traveller; where the seeds carry no clock time the
- * segment stays `null` and the UI must not display one.
+ * Times come from {@link CONNECTING_ITINERARIES} when it names the route, and
+ * from {@link synthesisedSchedule} when it does not. They are never omitted for
+ * a connecting itinerary — see the note on that function for why a null layover
+ * is worse than a demo one.
  */
 function segmentsFor(product: Product): Json[] {
   const route = parseRoute(product.flightRoute);
   if (!route) return [];
 
-  const scheduled = CONNECTING_ITINERARIES[[route.from, ...route.via, route.to].join('|')];
+  const scheduled =
+    CONNECTING_ITINERARIES[[route.from, ...route.via, route.to].join('|')] ??
+    (route.via.length > 0 ? synthesisedSchedule(route) : null);
   /**
    * One entry per *leg*, not per airport. `SIN → DXB → JFK` is two flights, so
    * `legs` is `[DXB, JFK]`: leg 1 departs `from` and arrives at `legs[0]`, leg
@@ -193,6 +195,73 @@ function segmentsFor(product: Product): Json[] {
       fareFamily: null,
     };
   });
+}
+
+/**
+ * A deterministic demo schedule for a connecting route the table does not name.
+ *
+ * `CONNECTING_ITINERARIES` is keyed by the exact route string, so it can only
+ * ever schedule the itineraries someone remembered to add. Generating routes
+ * against a hand-kept table drifts: the catalogue grew past the table, three
+ * connecting products (`HKG→DXB→LAX`, `SIN→DXB→LAX`, `LAX→DXB→JFK`) were seeded
+ * with **null** leg times, and because `withinLayoverBounds` deliberately passes
+ * an itinerary whose gap cannot be computed, those three survived a filter that
+ * asked for a one-minute maximum layover. A shopper asking for a tight
+ * connection was shown an itinerary of unknown length.
+ *
+ * So every connecting itinerary gets times. This is demo inventory in exactly
+ * the sense the table already documents — the operator name, route and fare are
+ * all illustrative — and a coherent schedule is what makes the layover filters
+ * answerable. The alternative on record was to leave the times null and let the
+ * filter abstain, which is the behaviour that produced the bug.
+ *
+ * Deterministic on the route string, so re-seeding produces byte-identical rows
+ * and the data does not reshuffle between runs (`hash()` in `seed-global.ts`
+ * exists for the same reason). The layover is the same 3h25m the hand-written
+ * table uses, so the two sources are indistinguishable to a consumer.
+ */
+function synthesisedSchedule(route: { from: string; to: string; via: string[] }): {
+  legs: { departureAt: string; arrivalAt: string; flightNumber: string; aircraft: string }[];
+} {
+  /** 2026-11-05T00:00Z, matching the hand-written table's base date. */
+  const BASE = Date.UTC(2026, 10, 5);
+  const MINUTE = 60_000;
+
+  /** FNV-1a, mirroring `seed-global.ts` — stable across Node versions. */
+  const hash = (value: string): number => {
+    let h = 2166136261;
+    for (let i = 0; i < value.length; i += 1) {
+      h ^= value.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  };
+
+  const airports = [route.from, ...route.via, route.to];
+  let cursor = BASE + (hash(airports.join('|')) % 720) * MINUTE;
+
+  const legs = airports.slice(0, -1).map((from, index) => {
+    const to = airports[index + 1];
+    // A plausible block time in the 5h–13h band, fixed per leg so the same
+    // route always yields the same schedule.
+    const blockMinutes = 300 + (hash(`${from}-${to}`) % 481);
+    const departureAt = cursor;
+    const arrivalAt = departureAt + blockMinutes * MINUTE;
+
+    // 3h25m on the ground at the intermediate stop: long enough to clear
+    // transit formalities, and identical to the hand-written table's buffer.
+    cursor = arrivalAt + 205 * MINUTE;
+
+    return {
+      departureAt: new Date(departureAt).toISOString(),
+      arrivalAt: new Date(arrivalAt).toISOString(),
+      // The seed carrier numbering pattern, not a real flight number.
+      flightNumber: `EK${100 + (hash(`${to}-${index}`) % 800)}`,
+      aircraft: 'B77W',
+    };
+  });
+
+  return { legs };
 }
 
 /**
@@ -325,11 +394,21 @@ function cabinCategoriesFor(product: Product): Json[] {
  * already exists (so a re-run never clobbers data a feed has populated).
  */
 /**
- * A comparable fingerprint of an itinerary: the airports, in order.
+ * A comparable fingerprint of an itinerary: the airports, in order, and when
+ * each leg is scheduled.
  *
  * Comparing `segmentCount` alone cannot tell `HKG → HKG` from `HKG → SIN` — both
  * are one leg — so a corrected route reads as unchanged and the stale
- * `FlightSegment` rows survive. This is the string the two blobs are judged on.
+ * `FlightSegment` rows survive.
+ *
+ * The timestamps are part of the signature for the same reason, one level down.
+ * Comparing airports only treats "no times" and "times" as identical, so a
+ * product whose schedule was *added* re-runs the seed, reports the itinerary
+ * unchanged, and keeps its null legs. That is exactly how three connecting
+ * itineraries (`HKG→DXB→LAX`, `SIN→DXB→LAX`, `LAX→DXB→JFK`) stayed schedule-less
+ * after the generator started producing routes the hand-written table does not
+ * name — and a null layover is not filterable, so they survived a one-minute
+ * layover cap and were shown to anyone asking for a tight connection.
  */
 function routeSignature(segments: unknown): string {
   if (!Array.isArray(segments)) return '';
@@ -338,7 +417,7 @@ function routeSignature(segments: unknown): string {
       const leg = entry as JsonSegment;
       const from = leg.departure?.airport ?? '';
       const to = leg.arrival?.airport ?? '';
-      return `${from}>${to}`;
+      return `${from}>${to}@${leg.departure?.scheduledAt ?? ''}`;
     })
     .join('|');
 }

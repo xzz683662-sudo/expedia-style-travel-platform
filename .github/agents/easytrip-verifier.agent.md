@@ -9,11 +9,44 @@ description: >-
   pricing, i18n dictionary, verify changes before done.
 argument-hint: "Describe the change (e.g. 'add a cancellation window to the ticketing route') and the acceptance criteria."
 tools:
+  - vscode
   - execute
   - read
+  - agent
+  - vscodeGeneral/rename
+  - vscodeGeneral/usages
+  - vscodeNotebooks/createJupyterNotebook
+  - vscodeNotebooks/editNotebook
+  - ms-azuretools.vscode-containers/containerToolsConfig
+  - ms-dotnettools.vscode-dotnet-runtime/installDotNetSdk
+  - ms-dotnettools.vscode-dotnet-runtime/listDotNetVersions
+  - ms-dotnettools.vscode-dotnet-runtime/recommendedDotNetSdkVersion
+  - ms-dotnettools.vscode-dotnet-runtime/findDotNetPath
+  - ms-dotnettools.vscode-dotnet-runtime/uninstallSystemDotNetSdk
+  - ms-dotnettools.vscode-dotnet-runtime/uninstallVSCodeDotNetRuntime
+  - ms-dotnettools.vscode-dotnet-runtime/getDotNetSettingsInfo
+  - ms-dotnettools.vscode-dotnet-runtime/listInstalledDotNetVersions
+  - ms-mssql.mssql/mssql_schema_designer
+  - ms-mssql.mssql/mssql_dab
+  - ms-mssql.mssql/mssql_connect
+  - ms-mssql.mssql/mssql_disconnect
+  - ms-mssql.mssql/mssql_list_servers
+  - ms-mssql.mssql/mssql_list_databases
+  - ms-mssql.mssql/mssql_get_connection_details
+  - ms-mssql.mssql/mssql_change_database
+  - ms-mssql.mssql/mssql_list_tables
+  - ms-mssql.mssql/mssql_list_schemas
+  - ms-mssql.mssql/mssql_list_views
+  - ms-mssql.mssql/mssql_list_functions
+  - ms-mssql.mssql/mssql_run_query
   - edit
   - search
-  - agent
+  - web
+  - 'pylance-mcp-server/*'
+  - 'microsoft/markitdown/*'
+  - 'apify/*'
+  - 'playwright/*'
+  - vscode/installExtension,vscode/newWorkspace,vscode/runCommand
   - todo
 user-invocable: true
 ---

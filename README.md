@@ -471,6 +471,8 @@ bash scripts/smoke-test.sh    # 102 checks, requires both services running
 bash scripts/mobile-check.sh  # 41 checks, responsive layer regression guard
 bash scripts/schema-audit.sh  # finds columns a seed writes but no route reads
 node scripts/check-images.mjs # every seed image URL must answer 200
+tsx scripts/check-media.ts    # no photograph is reused across the catalogue
+tsx scripts/catalogue-report.ts # catalogue invariants: names, photos, prices, variants
 node scripts/check-i18n-keys.mjs # en/zh key parity, and no dangling t('…') keys
 pnpm typecheck                # strict TS across api + web
 pnpm --filter @easytrip/web build
@@ -492,10 +494,35 @@ Two cheaper gates guard failure modes that are invisible to `tsc`:
 - **`check:images`** HEAD-checks every image URL the seed writes. Thirteen of sixty-one
   had silently 404'd, which is why destination tiles rendered as grey boxes; nothing in
   the type system or the test suite could see it.
+- **`check:media`** asserts no photograph is used by two products, and that every product
+  has one. The catalogue used to draw from a pool of three or four images per category,
+  which put a single Rome Colosseum frame on thirty cards. Images are now handed out at
+  most once from `photo-pools.ts` (per category) and `city-images.ts` (per city) — both
+  generated from Wikimedia Commons and reachability-checked — and a pool that runs dry
+  throws rather than wrapping around.
+- **`catalogue:report`** asserts the catalogue's own invariants: no duplicate slug, code or
+  display name within a city, a Chinese translation, a photograph, at least two variants and
+  a plausible price band per category. It is what catches a name template that is shorter
+  than the number of listings it has to name.
 - **`check:i18n`** asserts the `en` and `zh` dictionaries have identical key sets, and
   that every `t('…')` literal in `app/` and `components/` exists. `translate()` falls back
   to returning the key itself, so a typo renders as literal `nav.signIn` on the page —
   visible to a human, invisible to the compiler.
+
+### Catalogue scale
+
+Cities are sized by tier rather than uniformly: a global capital carries ~85 listings and a
+small town ~34, so a city page returns a full page of results instead of a handful.
+
+| Tier | Cities | Listings each |
+| --- | --- | --- |
+| A — global capitals | London, Paris, Rome, New York, Tokyo, Barcelona | ~81–85 |
+| B — large destinations | Edinburgh, Venice, Florence, Madrid, Amsterdam, Berlin, Lisbon, Los Angeles, San Francisco, Singapore, Sydney, Munich | ~55 |
+| C — everything else | the remaining 22 cities | ~34 |
+
+That is **~1,700 listings across 34 cities**, each with its own photograph and its own name.
+The tier table is `LISTINGS_BY_TIER` in `apps/api/prisma/seed-global.ts`; the counts are
+bounded by the image pools, so raising them means running `pnpm images:build` first.
 
 ### Browser audit and end-to-end chain
 
@@ -503,6 +530,7 @@ Two cheaper gates guard failure modes that are invisible to `tsc`:
 pnpm ux:audit:app        # renders the storefront at 1440x900 and 393x844, fails on defects
 pnpm e2e:web             # register → verify → search → reserve → pay → ticket
 pnpm ux:audit:reference  # the same audit against expedia.com (reports, never gates)
+node scripts/ux-audit/verify-home-images.mjs  # no photo twice on the home page, both breakpoints
 ```
 
 These are **not part of `pnpm verify`**: `verify` must stay deterministic and offline,
