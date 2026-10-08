@@ -6,6 +6,7 @@ import { api, ApiError, type ProductDetail } from '@/lib/api';
 import { addDaysIso, formatDate, formatMoney, relativeDay } from '@/lib/format';
 import { readCartToken, readToken, saveCartToken } from '@/lib/session';
 import type { LocaleCode } from '@/lib/i18n/config';
+import { htmlLang } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 
 /**
@@ -194,6 +195,7 @@ export function BookingPanel({
             <input
               type="date"
               className="input"
+              lang={htmlLang(locale)}
               value={checkOutDate}
               // Arrival is the earliest sensible departure: a same-day or earlier
               // checkout has no nights in it.

@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import type { SearchHit } from '@/lib/api';
+import { SafeImage } from '@/components/SafeImage';
 import { formatMoney, stars } from '@/lib/format';
 import type { LocaleCode } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
@@ -137,23 +138,29 @@ export function ProductCard({ hit, locale }: { hit: SearchHit; locale: LocaleCod
     assurances.push(t('search.instantConfirm'));
   }
 
+  // The highlight comes from the same flags as the assurances, so the two can
+  // say the same thing — "Priority entry" was rendered twice on one card. The
+  // highlight is the lead chip; filter its exact text out of the rest, which
+  // keeps working whatever string either side maps to.
+  const highlight = hit.badgeCode ? t(`search.badge${hit.badgeCode}`) : null;
+  const chips = highlight ? assurances.filter((text) => text !== highlight) : assurances;
+
   return (
     <article className="product-card">
       <Link href={`/products/${hit.slug}`} className="product-media" aria-hidden tabIndex={-1}>
-        {hit.imageUrl ? (
-          // Plain <img> keeps the build dependency-free; Next's image optimiser
-          // would need every partner CDN allow-listed.
-          <img src={hit.imageUrl} alt="" loading="lazy" />
-        ) : (
-          <div className="product-media-fallback" aria-hidden>
-            ✦
-          </div>
-        )}
-        {hit.badge && (
-          <span className="product-ribbon" style={{ boxShadow: 'var(--shadow-sm)' }}>
-            {hit.badge}
-          </span>
-        )}
+        <SafeImage
+          src={hit.imageUrl}
+          alt=""
+          fallback={
+            <div className="product-media-fallback" aria-hidden>
+              ✦
+            </div>
+          }
+        />
+        {/* No ribbon over the photo. A white label on a 96x96 phone thumbnail
+            covered 42% of the image, and on a photo of *someone else's*
+            holiday it reads as a sticker rather than information. The same
+            fact is a chip in the body below. */}
       </Link>
 
       <div className="product-body">
@@ -191,6 +198,10 @@ export function ProductCard({ hit, locale }: { hit: SearchHit; locale: LocaleCod
         )}
 
         <div className="row wrap" style={{ gap: 'var(--sp-3)' }}>
+          {/* The highlight leads the chip row: it is the strongest single
+              reason to pick this listing, so it reads first. */}
+          {highlight && <span className="badge badge-brand">{highlight}</span>}
+
           {hit.ratingCount > 0 && (
             <span className="rating">
               <span className="rating-stars" aria-hidden>
@@ -205,7 +216,7 @@ export function ProductCard({ hit, locale }: { hit: SearchHit; locale: LocaleCod
             </span>
           )}
 
-          {assurances.map((assurance) => (
+          {chips.map((assurance) => (
             <span key={assurance} className="badge badge-neutral">
               {assurance}
             </span>

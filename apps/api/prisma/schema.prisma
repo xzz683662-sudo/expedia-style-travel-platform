@@ -2030,6 +2030,14 @@ enum WalletTransactionKind {
   REFUND
   ADJUSTMENT
   REVERSAL
+  /// Customer-funded balance increase (充值). Distinct from CREDIT, which is a
+  /// *platform* credit (a goodwill adjustment), because the two have different
+  /// provenance and a statement must be able to tell them apart.
+  TOP_UP
+  /// Customer-requested payout (取现). The spendable balance drops the moment
+  /// the request is accepted so the same funds cannot also be spent; delivery
+  /// of the money is the payout rail's problem, not the ledger's.
+  WITHDRAWAL
 }
 
 model WalletTransaction {

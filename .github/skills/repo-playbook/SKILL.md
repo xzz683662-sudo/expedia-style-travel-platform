@@ -75,6 +75,14 @@ pnpm check:mobile
 `000000` HTTP codes there mean **connection refused** (server not running), not a route regression.
 smoke and realtime need :4000; mobile-check needs :3000 — start all three before `pnpm verify`.
 
+**It reads *every* stylesheet, not the first one.** The script used to run
+`ls .next/static/css/*.css | head -1`. Adding `next/font` made the build emit a second CSS
+file (278 KB of `@font-face`) whose name sorts first, so **21 selector checks reported
+"missing"** while nothing was broken. The signature of this trap: *every* CSS assertion
+fails, but "built CSS present" passes with a suspiciously large byte count. It now cats
+all of them into one scratch file — if you add another CSS-emitting plugin, that is the
+line to keep correct.
+
 ### Long-running servers need `setsid`, not `nohup &`
 
 `(setsid nohup <cmd> > /tmp/x.log 2>&1 < /dev/null &)` detaches the process from the terminal
@@ -200,6 +208,34 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
   `satisfies Record<LocaleCode, typeof en>`.
 - Dictionary values may be functions; `t('key', n)` calls them — functions are required for correct
   pluralization and word order.
+- **A missing key renders as its own name.** `translate()` falls back to returning the key string, so
+  `t('nav.signIn')` (the real key was `common.signIn`) shipped the literal text `nav.signIn` to the
+  page. `tsc` cannot see it — the key is an opaque string at the call site. Run `pnpm check:i18n`,
+  which also asserts `en`/`zh` have identical key sets.
+- **The API must not send display copy.** `search/service.ts` returned
+  `badge: 'Priority entry'`, which put English words on Chinese cards. It now returns a closed union
+  (`badgeCode: SearchBadgeCode`) that the dictionaries translate. Anything a shopper reads follows
+  this rule.
+- **Native controls follow the *browser* locale.** `<input type="date">` shows its format placeholder
+  in the browser's language, so an English page in a `zh-CN` browser rendered `yyyy/mm/日期`. The fix
+  is `lang={htmlLang(locale)}` on the input (`lib/i18n/config.ts`); verified in Chromium that
+  `lang="en-US"` yields `yyyy/mm/dd`. To reproduce, set the app locale by cookie *and* the browser
+  locale separately — otherwise the whole page turns Chinese and the case disappears.
+
+### Seed media (`apps/api/prisma/seed-*.ts`)
+
+- **A hard-coded image URL is an unchecked URL.** 13 of 61 `images.unsplash.com/photo-<id>` links had
+  silently 404'd, which is why destination tiles rendered as grey boxes for the life of the project.
+  Nothing in `tsc`, smoke or realtime could see it. Run `pnpm check:images` after any seed-media edit.
+- The container *can* reach the image hosts, so a 404 is a data bug, not a network one.
+- Replacements come from Wikipedia. **Never hand-build a Wikimedia thumb URL** — the host, hash path
+  and width segments must be exactly what the API issued (`thumb.wikimedia.org/.../1280px-<File>`);
+  a hand-written `upload.wikimedia.org/.../1200px-<File>` returns 400.
+  `scripts/resolve-replacement-images.mjs` resolves *and* verifies.
+- **A failed image is not just a hole.** Cards that overlay text on a photo become unreadable when
+  the photo never loads (white text on the light-grey card). `.product-media` and
+  `.destination-media` back their images with a dark background plus a gradient scrim for this
+  reason, and `SafeImage` swaps in a fallback rather than showing a broken-image icon.
 
 ### API contract gotchas
 
@@ -207,6 +243,38 @@ ls apps/api/dist/index.js && (cd apps/api && node -e "require('./dist/index.js')
 - `api.login(body)` / `api.register(body)` take an object, not positional args.
 - `/auth/me` returns `role` — frontend permission checks depend on it.
 - `api.me()` includes a `transactions` array in the loyalty payload.
+- **`Payment.orderId` is required**, so a standalone charge has nowhere to live. A wallet top-up
+  therefore *cannot* reuse the order payment path; it is a `WalletTransaction` (`TOP_UP` /
+  `WITHDRAWAL`) written by `modules/wallet/ledger.ts`, the single place a balance changes. Attaching
+  a card charge to a top-up is a payments-rail integration, not a wallet concern.
+- `postWalletEntry` rejects a zero amount and refuses to go negative (a negative balance reads as
+  "the shopper owes us", which the storefront cannot explain or settle).
+
+### Support chat (`modules/support/chat.ts`)
+
+- A load must state its perspective:
+  `getConversationWithMessages({ as: { kind: 'customer', userId } | { kind: 'staff' } })`. The
+  customer branch filters by `userId`, so a guessed id returns 404 rather than another shopper's
+  thread. `pnpm support-chat:contract` asserts this offline.
+- Realtime **pushes**; Postgres **records**. The socket (`support.message`, addressed to
+  `user:<id>` and `role:SUPPORT|ADMIN`) only refreshes the UI — a reload re-reads the same rows.
+- Unread counters live on the conversation and are maintained on write, so the widget badge and the
+  console queue are one indexed read rather than a `COUNT(*)` over messages.
+
+### Storefront CSS
+
+- **Do not overlay text on a card photo.** `.product-ribbon` (a white label) sat on
+  `.product-media`; mobile media is **96×96** while the ribbon stayed 88×44, so it covered **42%**
+  of the image across three wrapped lines (desktop: 7%). It was removed rather than restyled — the
+  same fact is now a chip in the card body, legible at every width and never hiding the image.
+  Measure this rather than eyeballing it: `node scripts/ux-audit/diagnose-card-ribbon.mjs`.
+- `.with-rail` switches to `flex-direction: column` below 860px and **must** also set
+  `align-items: stretch`. Leaving the base `flex-start` sizes each child to its *max-content*, so a
+  rail item containing a 7-column calendar computes ~540px on a 393px phone — and because `body`
+  sets `overflow-x: hidden`, the excess is silently clipped instead of scrollable.
+- `document.documentElement.scrollWidth` is useless as an overflow probe here for that same reason;
+  measure `document.body.scrollWidth`.
+- Bash history expansion eats `!` inside `node -e`. Write a `.mjs` file instead of fighting it.
 
 ### Next.js App Router
 

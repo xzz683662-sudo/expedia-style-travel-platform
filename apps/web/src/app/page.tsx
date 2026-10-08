@@ -3,7 +3,8 @@ import { api } from '@/lib/api';
 import { formatMoney } from '@/lib/format';
 import { ProductCard } from '@/components/ProductCard';
 import { PromoStrip } from '@/components/PromoStrip';
-import { resolveServerLocale } from '@/lib/i18n/config';
+import { SafeImage } from '@/components/SafeImage';
+import { resolveServerLocale, htmlLang } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 import { brandName, brandTagline } from '@/lib/brand';
 import type { LocaleCode } from '@/lib/i18n/config';
@@ -82,7 +83,7 @@ export default async function HomePage() {
               <div>
                 <h2>{t('home.destinations')}</h2>
                 <p className="small muted" style={{ margin: 0 }}>
-                  {t('home.heroSubtitle')}
+                  {t('home.destinationsSubtitle')}
                 </p>
               </div>
               <Link href="/search" className="btn btn-ghost btn-sm">
@@ -98,11 +99,18 @@ export default async function HomePage() {
                   className="destination-tile"
                 >
                   <div className="destination-media">
-                    {destination.heroImageUrl ? (
-                      <img src={destination.heroImageUrl} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
-                    ) : (
-                      <div className="skeleton" style={{ width: '100%', height: '100%' }} />
-                    )}
+                    <SafeImage
+                      src={destination.heroImageUrl}
+                      alt={destination.name}
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      fallback={
+                        // No image (or it failed): the tile keeps a dark base so
+                        // the white caption stays legible instead of sitting on grey.
+                        <div className="destination-fallback" aria-hidden>
+                          <span>{destination.name.slice(0, 1)}</span>
+                        </div>
+                      }
+                    />
                     <div className="destination-scrim" />
                     <div className="destination-caption">
                       <div className="destination-name">{destination.name}</div>
@@ -242,6 +250,9 @@ function SearchBox({ locale }: { locale: LocaleCode }) {
           name="date"
           type="date"
           className="input"
+          // Without this the native control renders its format placeholder in
+          // the *browser's* locale, so an English page shows `年月日`.
+          lang={htmlLang(locale)}
           style={{ border: 'none', padding: '4px 0', fontSize: 16 }}
         />
       </div>
@@ -336,11 +347,11 @@ function CollectionCard({
             }}
           >
             {hit.imageUrl && (
-              <img
+              <SafeImage
                 src={hit.imageUrl}
                 alt=""
                 style={{ width: 46, height: 46, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }}
-                loading="lazy"
+                fallback={<div className="img-fallback img-fallback-sm" aria-hidden />}
               />
             )}
             <div className="grow" style={{ minWidth: 0 }}>

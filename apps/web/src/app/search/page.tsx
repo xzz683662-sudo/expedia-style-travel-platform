@@ -5,7 +5,7 @@ import { formatMoney } from '@/lib/format';
 import { ProductCard } from '@/components/ProductCard';
 import { EmptyState } from '@/components/PageShell';
 import { FilterRail } from '@/components/FilterRail';
-import { resolveServerLocale } from '@/lib/i18n/config';
+import { resolveServerLocale, htmlLang } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 import type { LocaleCode } from '@/lib/i18n/config';
 
@@ -325,7 +325,14 @@ function UnifiedSearchPanel({ active, locale }: { active: ActiveFilters; locale:
 
       <label className="field">
         <span className="label">{t('search.when')}</span>
-        <input className="input" type="date" name="date" defaultValue={active.date ? String(active.date) : ''} />
+        <input
+          className="input"
+          type="date"
+          name="date"
+          // See `htmlLang`: a date input formats itself in the browser's locale.
+          lang={htmlLang(locale)}
+          defaultValue={active.date ? String(active.date) : ''}
+        />
       </label>
 
       <button type="submit" className="btn btn-primary">

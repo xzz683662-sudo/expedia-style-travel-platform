@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { api, type AddPaymentMethodInput, type SavedPaymentMethod } from '@/lib/api';
+import { api, type AddPaymentMethodInput, type SavedPaymentMethod, type WalletEntry } from '@/lib/api';
 import { readToken } from '@/lib/session';
 import { formatMoney, formatDate } from '@/lib/format';
 import type { LocaleCode } from '@/lib/i18n/config';
@@ -21,10 +21,12 @@ const CHANNEL_LABEL: Record<string, string> = {
  * travel documents in one place.
  *
  * A saved method is a *reference* — brand and last four, or a wallet identity.
- * Nothing here is a secret, and none of it settles money on its own: the
- * settlement rails run sandbox-only in this stage (see
- * `apps/api/src/modules/supply/credentials.ts`), which is why the panel is
- * labelled rather than presented as a live checkout.
+ * Nothing here is a secret, and none of it settles money on its own: a method is
+ * only ever used through the checkout's own payment step.
+ *
+ * The balance is real state, not a display figure: top-up credits it and
+ * withdraw debits it, each writing a `WalletTransaction` so the statement below
+ * always explains the number above it.
  */
 export function AccountCenter({ locale }: { locale: LocaleCode }) {
   const t = createTranslator(locale);
@@ -33,6 +35,18 @@ export function AccountCenter({ locale }: { locale: LocaleCode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // --- Stored-value balance ---
+  const [entries, setEntries] = useState<WalletEntry[]>([]);
+  const [balanceCents, setBalanceCents] = useState(0);
+  /** Which money form is open. `null` means both are collapsed. */
+  const [walletMode, setWalletMode] = useState<'top-up' | 'withdraw' | null>(null);
+  const [walletAmount, setWalletAmount] = useState('');
+  const [walletChannel, setWalletChannel] = useState<'CARD' | 'PAYPAL' | 'CRYPTO_TRC20'>('CARD');
+  const [walletDestination, setWalletDestination] = useState('');
+  const [walletNotice, setWalletNotice] = useState<string | null>(null);
+  const [walletError, setWalletError] = useState<string | null>(null);
+  const [walletBusy, setWalletBusy] = useState(false);
 
   const [draft, setDraft] = useState<AddPaymentMethodInput>({ channel: 'CARD', card: { brand: 'visa', last4: '' } });
   const [draftLabel, setDraftLabel] = useState('');
@@ -45,9 +59,11 @@ export function AccountCenter({ locale }: { locale: LocaleCode }) {
       return;
     }
     try {
-      const data = await api.accountOverview(token);
+      const [data, walletData] = await Promise.all([api.accountOverview(token), api.wallet(token)]);
       setOverview(data);
       setMethodCount(data.paymentMethods.length);
+      setEntries(walletData.entries);
+      setBalanceCents(walletData.balanceCents);
     } catch {
       setError(t('account.couldNotLoadTickets'));
     } finally {
@@ -58,6 +74,47 @@ export function AccountCenter({ locale }: { locale: LocaleCode }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /**
+   * Submits a top-up or a withdrawal.
+   *
+   * The amount is entered in major units and converted to minor units here,
+   * once: the API only ever speaks integer minor units, so rounding happens at
+   * the boundary rather than being smeared through the layers.
+   */
+  async function submitWallet(event: React.FormEvent) {
+    event.preventDefault();
+    const token = readToken();
+    if (!token || !walletMode) return;
+
+    const cents = Math.round(Number(walletAmount) * 100);
+    if (!Number.isFinite(cents) || cents < 100) {
+      setWalletError(t('account.minimumAmount'));
+      return;
+    }
+
+    setWalletBusy(true);
+    setWalletError(null);
+    setWalletNotice(null);
+    try {
+      if (walletMode === 'top-up') {
+        await api.topUpWallet(token, { amountCents: cents, channel: walletChannel });
+        setWalletNotice(t('account.walletTopUpDone'));
+      } else {
+        await api.withdrawWallet(token, { amountCents: cents, destination: walletDestination.trim() });
+        setWalletNotice(t('account.walletWithdrawDone'));
+      }
+      const walletData = await api.wallet(token);
+      setEntries(walletData.entries);
+      setBalanceCents(walletData.balanceCents);
+      setWalletAmount('');
+      setWalletMode(null);
+    } catch {
+      setWalletError(t('account.walletError'));
+    } finally {
+      setWalletBusy(false);
+    }
+  }
 
   async function refreshMethods() {
     const token = readToken();
@@ -121,12 +178,15 @@ export function AccountCenter({ locale }: { locale: LocaleCode }) {
     return (
       <div className="empty-state">
         <p className="muted">{error ?? t('account.signInToAccount')}</p>
-        <Link className="btn btn-primary" href="/login">{t('nav.signIn')}</Link>
+        <Link className="btn btn-primary" href="/login">{t('common.signIn')}</Link>
       </div>
     );
   }
 
   const { profile, wallet, loyalty, travelers, paymentMethods, stats } = overview;
+  /** `wallet` from the overview is authoritative at first paint; local state
+   *  takes over after a movement so the figure updates without a full reload. */
+  const balance = entries.length > 0 || balanceCents > 0 ? balanceCents : wallet.balanceCents;
 
   return (
     <div className="grid" style={{ gap: 'var(--sp-5)' }}>
@@ -152,9 +212,122 @@ export function AccountCenter({ locale }: { locale: LocaleCode }) {
 
         <section className="card card-pad">
           <h2 style={{ fontSize: 17, marginTop: 0 }}>{t('account.balance')}</h2>
-          <p style={{ fontSize: 28, fontWeight: 700, margin: '6px 0' }}>{formatMoney(wallet.balanceCents, 'USD')}</p>
+          <p style={{ fontSize: 28, fontWeight: 700, margin: '6px 0' }}>{formatMoney(balance, 'USD')}</p>
           <p className="tiny subtle">{t('account.walletHint')}</p>
-          <div className="divider" style={{ margin: '10px 0' }} />
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button
+              className={`btn btn-sm ${walletMode === 'top-up' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => {
+                setWalletMode(walletMode === 'top-up' ? null : 'top-up');
+                setWalletError(null);
+                setWalletNotice(null);
+              }}
+            >
+              {t('account.topUp')}
+            </button>
+            <button
+              className={`btn btn-sm ${walletMode === 'withdraw' ? 'btn-primary' : 'btn-secondary'}`}
+              disabled={balance <= 0}
+              onClick={() => {
+                setWalletMode(walletMode === 'withdraw' ? null : 'withdraw');
+                setWalletError(null);
+                setWalletNotice(null);
+              }}
+            >
+              {t('account.withdraw')}
+            </button>
+          </div>
+
+          {walletMode && (
+            <form className="stack-sm" style={{ marginTop: 12 }} onSubmit={submitWallet}>
+              <label className="field">
+                <span className="label">{t('account.amount')}</span>
+                <input
+                  className="input"
+                  inputMode="decimal"
+                  placeholder="50.00"
+                  value={walletAmount}
+                  onChange={(e) => setWalletAmount(e.target.value)}
+                />
+              </label>
+
+              {walletMode === 'top-up' ? (
+                <label className="field">
+                  <span className="label">{t('account.fundFrom')}</span>
+                  <select
+                    className="input"
+                    value={walletChannel}
+                    onChange={(e) => setWalletChannel(e.target.value as typeof walletChannel)}
+                  >
+                    <option value="CARD">{CHANNEL_LABEL.CARD}</option>
+                    <option value="PAYPAL">{CHANNEL_LABEL.PAYPAL}</option>
+                    <option value="CRYPTO_TRC20">{CHANNEL_LABEL.CRYPTO_TRC20}</option>
+                  </select>
+                </label>
+              ) : (
+                <label className="field">
+                  <span className="label">{t('account.withdrawTo')}</span>
+                  <input
+                    className="input"
+                    placeholder={t('account.withdrawToPlaceholder')}
+                    value={walletDestination}
+                    onChange={(e) => setWalletDestination(e.target.value)}
+                  />
+                </label>
+              )}
+
+              {walletError && <p className="form-error">{walletError}</p>}
+
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={
+                  walletBusy ||
+                  !walletAmount ||
+                  (walletMode === 'withdraw' && walletDestination.trim().length < 3)
+                }
+              >
+                {walletBusy
+                  ? t('account.walletProcessing')
+                  : walletMode === 'top-up'
+                    ? t('account.confirmTopUp')
+                    : t('account.confirmWithdraw')}
+              </button>
+            </form>
+          )}
+
+          {walletNotice && (
+            <p className="small badge badge-positive" style={{ marginTop: 10 }}>{walletNotice}</p>
+          )}
+
+          <div className="divider" style={{ margin: '12px 0' }} />
+
+          <h3 style={{ fontSize: 14, margin: '0 0 6px' }}>{t('account.walletActivity')}</h3>
+          {entries.length === 0 ? (
+            <p className="tiny subtle" style={{ margin: 0 }}>{t('account.noWalletActivity')}</p>
+          ) : (
+            <div className="stack-sm">
+              {entries.slice(0, 8).map((entry) => (
+                <div key={entry.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                  <span className="grow small">
+                    {/* The kind is the label — "Top-up" vs "Refund" is the thing
+                        the reader cares about, and the note is the detail. */}
+                    <span className="bold">{t(`account.walletKind${entry.kind}`)}</span>
+                    {entry.note ? <span className="tiny subtle"> · {entry.note}</span> : null}
+                  </span>
+                  <span
+                    className="small bold"
+                    style={{ color: entry.amountCents < 0 ? 'var(--critical-600)' : 'var(--success-600)' }}
+                  >
+                    {entry.amountCents < 0 ? '−' : '+'}
+                    {formatMoney(Math.abs(entry.amountCents), entry.currency)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="divider" style={{ margin: '12px 0' }} />
           <p className="small" style={{ margin: 0 }}>
             {t('account.pointsBalance')}: <span className="bold">{loyalty?.points ?? 0}</span>
             {loyalty ? <span className="badge badge-brand" style={{ marginLeft: 8 }}>{loyalty.tier}</span> : null}
@@ -166,7 +339,6 @@ export function AccountCenter({ locale }: { locale: LocaleCode }) {
       <section className="card card-pad">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
           <h2 style={{ fontSize: 17, margin: 0 }}>{t('account.savedCards')}</h2>
-          <span className="badge badge-warning">{t('account.sandboxNote')}</span>
         </div>
 
         {paymentMethods.length === 0 ? (
@@ -285,7 +457,6 @@ export function AccountCenter({ locale }: { locale: LocaleCode }) {
         <div style={{ marginTop: 10 }}>
           <button className="btn btn-primary" disabled={busy} onClick={submit}>{t('account.save')}</button>
         </div>
-        <p className="tiny subtle" style={{ marginTop: 8 }}>{t('account.sandboxNote')}</p>
       </section>
 
       {/* Travelers ---------------------------------------------------------- */}

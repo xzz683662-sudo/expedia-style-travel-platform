@@ -464,7 +464,7 @@ const FEATURED_PRODUCTS: SeedProduct[] = [
     tags: ['castle', 'history', 'royal', 'landmark', 'unesco'],
     media: [
       { url: 'https://images.unsplash.com/photo-1513635269975-59663e0ac1ad?w=1200&q=80', altText: 'Tower Bridge over the Thames at dusk' },
-      { url: 'https://images.unsplash.com/photo-1591557328080-9f0b4b2b3b0f?w=1200&q=80', altText: 'Historic stone tower and battlements' },
+      { url: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/e/ec/Tower_of_London_from_the_Shard_%288515883950%29.jpg/1280px-Tower_of_London_from_the_Shard_%288515883950%29.jpg', altText: 'Historic stone tower and battlements' },
     ],
     translations: [
       { locale: 'zh', name: '伦敦塔 · 含王冠珠宝', summary: '伦敦塔核心区的千年历史。门票含伦敦塔建筑群、王冠与灌木园、军械库，以及由 Beefeater 亲自带领的仪仗卫队导览。出口步行片刻即可到达碎片大厦与河景。' },
@@ -869,8 +869,8 @@ const FEATURED_PRODUCTS: SeedProduct[] = [
     durationMinutes: 150,
     tags: ['art', 'renaissance', 'uffizi', 'museum', 'guided'],
     media: [
-      { url: 'https://images.unsplash.com/photo-1543429776-2782fc586c70?w=1200&q=80', altText: 'Florence skyline and Duomo' },
-      { url: 'https://images.unsplash.com/photo-1577083552431-6e5fd01988f5?w=1200&q=80', altText: 'Renaissance painting in an ornate gallery' },
+      { url: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3a/Firenze_-_Piazzale_Michelangelo%2C_Firenze%2C_Italy_-_April_6%2C_2015_02.jpg/1280px-Firenze_-_Piazzale_Michelangelo%2C_Firenze%2C_Italy_-_April_6%2C_2015_02.jpg', altText: 'Florence skyline and Duomo' },
+      { url: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/d7/Florence%2C_Italy_-_panoramio_%28125%29.jpg/1280px-Florence%2C_Italy_-_panoramio_%28125%29.jpg', altText: 'Renaissance painting in an ornate gallery' },
     ],
     translations: [
       { locale: 'zh', name: '乌菲兹美术馆 · 艺术史家导览', summary: '看乌菲兹需要一位能把文艺复兴放进背景的向导。门票含优先入场与两小时小团导览，涵盖波提切利展厅、达·芬奇《圣告》、米开朗琪罗《多纳太罗之女》与威尼斯画派精品。' },
@@ -986,7 +986,7 @@ const FEATURED_PRODUCTS: SeedProduct[] = [
     tags: ['gaudi', 'church', 'unesco', 'architecture', 'tower'],
     media: [
       { url: 'https://images.unsplash.com/photo-1539037116277-4db20889f2d4?w=1200&q=80', altText: 'Barcelona skyline and Sagrada Familia' },
-      { url: 'https://images.unsplash.com/photo-1583779457094-ab6f77f7bf57?w=1200&q=80', altText: 'Intricate modernist façade detail' },
+      { url: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/e/ef/SF_maig_2_cropped.jpg/1280px-SF_maig_2_cropped.jpg', altText: 'Intricate modernist façade detail' },
     ],
     translations: [
       { locale: 'es-ES', name: 'Sagrada Família con torre y ascensor', summary: 'Entrada con horario al templo de Gaudí, ascensor a la torre Nacimiento y museo de la cripta.' },
@@ -1211,7 +1211,7 @@ const FEATURED_PRODUCTS: SeedProduct[] = [
     durationMinutes: 135,
     tags: ['museum', 'art', 'van-gogh', 'culture', 'must-see'],
     media: [
-      { url: 'https://images.unsplash.com/photo-1577083552431-6e5fd01988f5?w=1200&q=80', altText: 'Post-impressionist painting on a gallery wall' },
+      { url: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/d/d7/Florence%2C_Italy_-_panoramio_%28125%29.jpg/1280px-Florence%2C_Italy_-_panoramio_%28125%29.jpg', altText: 'Post-impressionist painting on a gallery wall' },
       { url: 'https://images.unsplash.com/photo-1534351590666-13e3e96b5017?w=1200&q=80', altText: 'Amsterdam canal houses at dusk' },
     ],
     translations: [
@@ -1325,7 +1325,7 @@ const FEATURED_PRODUCTS: SeedProduct[] = [
     tags: ['hop-on-hop-off', 'hollywood', 'sightseeing', 'beverly-hills', 'bus'],
     media: [
       { url: 'https://images.unsplash.com/photo-1534190760961-74e8c1c5c3da?w=1200&q=80', altText: 'Hollywood Boulevard and the theatre marquees' },
-      { url: 'https://images.unsplash.com/photo-1515894347712-4d9164b20e94?w=1200&q=80', altText: 'Palm-lined boulevard in Los Angeles' },
+      { url: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/2/2f/Hollywood_sign_%288485145044%29.jpg/1280px-Hollywood_sign_%288485145044%29.jpg', altText: 'Palm-lined boulevard in Los Angeles' },
     ],
     translations: [
       { locale: 'zh', name: '好莱坞与比佛利山庄观光', summary: '两条敞篷线路串联好莱坞大道、比佛利山庄与太平洋海岸，随车导游讲述每个街区的历史。可升级为明星宅邸之旅，走进两间仍在运作的摄影棚。' },
@@ -1544,7 +1544,7 @@ const FEATURED_PRODUCTS: SeedProduct[] = [
     tags: ['sailing', 'sunset', 'bay', 'dinner', 'miami'],
     media: [
       { url: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=1200&q=80', altText: 'Miami beach and turquoise water' },
-      { url: 'https://images.unsplash.com/photo-1518552718881-7f1813701a86?w=1200&q=80', altText: 'Sailboat on open water at sunset' },
+      { url: 'https://thumb.wikimedia.org/wikipedia/commons/thumb/b/bf/Ocean_drive_day_2009j.JPG/1280px-Ocean_drive_day_2009j.JPG', altText: 'Sailboat on open water at sunset' },
     ],
     translations: [
       { locale: 'zh', name: '比斯坎湾日落帆船', summary: '乘 40 尺双体帆船驶出比斯坎湾，掠过迈阿密市中心天际线与迈阿密港。晚间含三道式晚餐与酒水畅饮，船员还会在夕阳里为您拍下与天际线的合影。' },

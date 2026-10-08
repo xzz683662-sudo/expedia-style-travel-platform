@@ -11,6 +11,9 @@ import {
   setDefaultPaymentMethod,
 } from '../modules/payments/methods';
 import { STAGE_PAYMENT_CHANNELS } from '../modules/supply/credentials';
+import { createInAppNotification } from '../modules/realtime/notify';
+import { listWalletEntries, postWalletEntry } from '../modules/wallet/ledger';
+import { WalletTransactionKind } from '@prisma/client';
 
 /**
  * ---------------------------------------------------------------------------
@@ -146,6 +149,104 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       liveSettlement: false,
     })),
   }));
+
+  // -------------------------------------------------------------------------
+  // Stored-value balance (top-up / withdraw)
+  // -------------------------------------------------------------------------
+
+  /** Channels a top-up may be funded from. */
+  const TOP_UP_CHANNELS = ['CARD', 'PAYPAL', 'CRYPTO_TRC20'] as const;
+
+  const TOP_UP_LABEL: Record<(typeof TOP_UP_CHANNELS)[number], string> = {
+    CARD: 'card',
+    PAYPAL: 'PayPal',
+    CRYPTO_TRC20: 'USDT (TRC20)',
+  };
+
+  /** The shopper's own statement: balance plus recent movements. */
+  app.get('/account/wallet', {}, async (request) => {
+    const user = requireAuth(request);
+
+    const [profile, entries] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: user.id },
+        select: { walletCents: true, walletEnabled: true },
+      }),
+      listWalletEntries(user.id),
+    ]);
+
+    return {
+      balanceCents: profile?.walletCents ?? 0,
+      enabled: profile?.walletEnabled ?? false,
+      currency: 'USD',
+      entries: entries.map((entry) => ({ ...entry, createdAt: entry.createdAt.toISOString() })),
+    };
+  });
+
+  /**
+   * Bounds are deliberately explicit rather than open-ended: a stored-value
+   * balance is a float the platform carries, so a mistyped amount must be
+   * refused at the edge instead of becoming an unbounded liability.
+   */
+  const amountField = z.number().int().min(100).max(500_000); // 1.00 – 5,000.00
+
+  const topUpBody = z.object({
+    amountCents: amountField,
+    channel: z.enum(TOP_UP_CHANNELS),
+  });
+
+  /** 充值 — adds spendable credit. */
+  app.post('/account/wallet/top-up', {}, async (request, reply) => {
+    const user = requireAuth(request);
+    const body = topUpBody.parse(request.body ?? {});
+
+    const result = await postWalletEntry({
+      userId: user.id,
+      amountCents: body.amountCents,
+      kind: WalletTransactionKind.TOP_UP,
+      note: `Top-up via ${TOP_UP_LABEL[body.channel]}`,
+      actorId: user.id,
+      actorEmail: user.email,
+    });
+
+    return reply.status(201).send({ ...result, currency: 'USD' });
+  });
+
+  const withdrawBody = z.object({
+    amountCents: amountField,
+    /** Where the money should go, e.g. "Card ending 4242" or "Bank ••••6789". */
+    destination: z.string().trim().min(3).max(120),
+  });
+
+  /** 取现 — pays credit back out. */
+  app.post('/account/wallet/withdraw', {}, async (request, reply) => {
+    const user = requireAuth(request);
+    const body = withdrawBody.parse(request.body ?? {});
+
+    // A debit, so the spendable balance drops the moment the request is
+    // accepted and the same funds cannot also be spent at checkout. The
+    // negative-balance guard in `postWalletEntry` is what rejects an overdraft.
+    const result = await postWalletEntry({
+      userId: user.id,
+      amountCents: -body.amountCents,
+      kind: WalletTransactionKind.WITHDRAWAL,
+      note: `Withdrawal to ${body.destination}`,
+      actorId: user.id,
+      actorEmail: user.email,
+    });
+
+    // A durable record, because the ledger alone does not tell the shopper the
+    // request is being actioned. Best-effort: a failed notification must not
+    // undo a balance movement that already committed.
+    await createInAppNotification({
+      userId: user.id,
+      template: 'wallet.withdrawal_requested',
+      subject: `Withdrawal of ${(body.amountCents / 100).toFixed(2)} requested`,
+      payload: { amountCents: body.amountCents, destination: body.destination },
+    }).catch(() => null);
+
+    return reply.status(201).send({ ...result, currency: 'USD' });
+  });
 }
 
 /**

@@ -268,13 +268,25 @@ export function writeReport(path: string, heading: string, intro: string, result
     }
     lines.push('');
     for (const finding of result.findings) {
-      lines.push(`- **${finding.severity}** · \`${finding.kind}\` — ${finding.detail}`);
+      // The detail is inline code on purpose: it carries DOM selectors, URLs and
+      // — as a `small-tap-target` finding does — the accessible name of a
+      // control, which can be an email address. Left as prose, markdownlint flags
+      // that as a bare URL (MD034) and fails the docs lint. Inline code also
+      // reads better for what is, in substance, a code snippet. Any backtick in
+      // the detail would break the fence, so it is normalised out first.
+      const detail = finding.detail.replace(/`/g, "'");
+      lines.push(`- **${finding.severity}** · \`${finding.kind}\` — \`${detail}\``);
     }
     lines.push('');
   }
 
   mkdirSync(join(path, '..'), { recursive: true });
-  writeFileSync(path, `${lines.join('\n')}\n`, 'utf8');
+  // Collapse runs of blank lines. The section builder above pushes a leading and
+  // a trailing `''` per result, which is correct at the boundaries but produces
+  // doubles between sections — and markdownlint (MD012) fails the docs build on
+  // them. Normalising once here beats getting every push exactly right.
+  const markdown = `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
+  writeFileSync(path, markdown, 'utf8');
 }
 
 /** True when the page looks like an anti-bot interstitial rather than the site. */

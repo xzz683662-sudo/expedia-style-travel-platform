@@ -36,10 +36,12 @@
     "test:realtime": "node scripts/realtime-test.mjs",
     "test:feed": "node scripts/feed-test.mjs",
     "check:mobile": "bash scripts/mobile-check.sh",
+    "check:images": "node scripts/check-images.mjs",
+    "check:i18n": "node --no-warnings scripts/check-i18n-keys.mjs",
     "ux:audit:app": "playwright test scripts/ux-audit/app.spec.ts",
     "ux:audit:reference": "playwright test scripts/ux-audit/reference.spec.ts",
     "e2e:web": "playwright test scripts/ux-audit/app.spec.ts --project=desktop --grep \"end-to-end\" --grep-invert \"render audit\"",
-    "verify": "pnpm typecheck && pnpm audit:schema && pnpm supply:contract && pnpm inventory:contract && pnpm auth:contract && pnpm support-chat:contract && pnpm credentials:contract && pnpm smoke && pnpm test:realtime && pnpm check:mobile",
+    "verify": "pnpm typecheck && pnpm audit:schema && pnpm check:i18n && pnpm supply:contract && pnpm inventory:contract && pnpm auth:contract && pnpm support-chat:contract && pnpm credentials:contract && pnpm smoke && pnpm test:realtime && pnpm check:mobile",
     "db:indexes": "pnpm --filter @easytrip/api db:indexes"
   },
   "devDependencies": {

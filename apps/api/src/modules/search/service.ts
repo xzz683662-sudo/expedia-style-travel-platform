@@ -134,7 +134,16 @@ export type SearchHit = {
    * which is the normal case — the storefront renders it either way.
    */
   live: LivePriceInfo | null;
-  badge: string | null;
+  /**
+   * A highlight worth surfacing on the card, as a **code, not copy**.
+   *
+   * It used to send the display string (`'Priority entry'`), which meant the API
+   * owned UI text and — because the storefront is bilingual — shipped English
+   * words onto otherwise Chinese cards. A code keeps the two concerns apart: the
+   * API decides *what* is true about a product, the web layer decides how to say
+   * it. See `search.badgePRIORITY_ENTRY` and friends in the dictionaries.
+   */
+  badgeCode: SearchBadgeCode | null;
   tags: string[];
 
   /**
@@ -638,7 +647,7 @@ async function searchPostgres(params: SearchParams): Promise<SearchResult> {
         // always a miss, so every Postgres-backed hit silently reported
         // `live: null` even when a source had answered.
         live: livePrices.get(doc.productId) ?? null,
-        badge: null,
+        badgeCode: null,
         tags: doc.tags,
         starRating: doc.starRating ?? null,
         boardBasis: doc.boardBasis ?? null,
@@ -752,10 +761,10 @@ async function hydrateHits(hits: SearchHit[], locale = 'en'): Promise<SearchHit[
       title: translation?.name ?? product.slug,
       summary: translation?.summary ?? hit.summary,
       imageUrl: product.media[0]?.url ?? null,
-      // Positive, trust-building badge only. A discount percentage is
+      // Positive, trust-building signal only. A discount percentage is
       // deliberately not used here: the storefront reads as a premium
       // consultancy, not a bargain bin.
-      badge: badgeFor(product),
+      badgeCode: badgeCodeFor(product),
       tags: product.tags.map((t) => t.slug),
       category: {
         airlineName: product.airlineName,
@@ -776,13 +785,23 @@ async function hydrateHits(hits: SearchHit[], locale = 'en'): Promise<SearchHit[
 }
 
 /**
- * The small ribbon on a card. Ranked from most to least differentiating so a
- * product always gets the strongest honest signal it has.
+ * The small highlight a card may carry. Ranked from most to least
+ * differentiating, so a product always gets the strongest honest signal it has.
+ *
+ * Deliberately a closed union rather than a free string: it is a value the web
+ * layer translates, so an open string would just reintroduce untranslatable
+ * copy into the API.
  */
-function badgeFor(product: { skipTheLine: boolean; instantConfirm: boolean; privateDeparture: boolean }): string | null {
-  if (product.skipTheLine) return 'Priority entry';
-  if (product.privateDeparture) return 'Private departure';
-  if (product.instantConfirm) return 'Instant confirmation';
+export type SearchBadgeCode = 'PRIORITY_ENTRY' | 'PRIVATE_DEPARTURE' | 'INSTANT_CONFIRMATION';
+
+function badgeCodeFor(product: {
+  skipTheLine: boolean;
+  instantConfirm: boolean;
+  privateDeparture: boolean;
+}): SearchBadgeCode | null {
+  if (product.skipTheLine) return 'PRIORITY_ENTRY';
+  if (product.privateDeparture) return 'PRIVATE_DEPARTURE';
+  if (product.instantConfirm) return 'INSTANT_CONFIRMATION';
   return null;
 }
 
@@ -1058,7 +1077,7 @@ async function searchOpenSearch(params: SearchParams): Promise<SearchResult> {
           distanceKm: distance,
           nextAvailableDate: price.nextDate,
           live: livePrices.get(h.productId as string) ?? null,
-          badge: null,
+          badgeCode: null,
           tags: (h.tags as string[]) ?? [],
           starRating: (h.starRating as number) ?? null,
           boardBasis: (h.boardBasis as string) ?? null,

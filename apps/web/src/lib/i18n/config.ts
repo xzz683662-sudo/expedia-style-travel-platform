@@ -24,6 +24,20 @@ export const DEFAULT_LOCALE: LocaleCode = 'en';
 
 export const LOCALE_COOKIE = 'easytrip_lang';
 
+/**
+ * The BCP-47 tag for `<html lang>` and for native controls.
+ *
+ * A `<input type="date">` renders its format placeholder in the *browser's*
+ * locale, not the page's — so an English page opened in a Chinese-locale browser
+ * shows `年月日` where every other string is English. Setting `lang` on the input
+ * is what fixes it (verified in Chromium: `lang="en-US"` renders `yyyy/mm/dd`).
+ * Drives both the document and each date input from one helper so they cannot
+ * disagree.
+ */
+export function htmlLang(locale: LocaleCode): string {
+  return locale === 'zh' ? 'zh-CN' : 'en';
+}
+
 export function isLocale(value: string | undefined | null): value is LocaleCode {
   return LOCALES.some((l) => l.code === value);
 }

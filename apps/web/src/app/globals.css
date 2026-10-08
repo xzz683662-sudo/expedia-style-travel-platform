@@ -55,7 +55,9 @@
   --text-inverse: var(--white);
 
   /* Typography */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-sans: var(--font-latin), var(--font-cjk), -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, 'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Noto Sans CJK SC', 'Source Han Sans SC', 'WenQuanYi Micro Hei', sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
 
   /* Space */
@@ -1179,23 +1181,37 @@ a.promo-card:hover {
   background: linear-gradient(135deg, var(--bg-muted), var(--surface));
 }
 
-/* The positive badge ("Priority entry", "Instant confirmation"). Neutral rather
-   than accent-coloured: an accent ribbon reads as a promotion, which is the
-   opposite of the positioning we want. */
-.product-ribbon {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  padding: 4px 9px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(6px);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
+/* --------------------------------------------------------------------------
+   Generic image fallback
+   --------------------------------------------------------------------------
+   The shape a broken or blocked image leaves behind. Deliberately a *neutral
+   placeholder*, not a broken-image icon and not a blank hole: the seed once
+   carried 13 dead CDN links and the only symptom was empty boxes, so a visible
+   placeholder is also the cheapest early warning that a URL has gone.
+   -------------------------------------------------------------------------- */
+.img-fallback {
+  width: 100%;
+  height: 100%;
+  min-height: 120px;
+  display: grid;
+  place-items: center;
+  color: var(--text-subtle);
+  font-size: 26px;
+  background: linear-gradient(135deg, var(--ink-100) 0%, var(--ink-200) 100%);
 }
+
+.img-fallback-sm {
+  min-height: 0;
+  font-size: 14px;
+  border-radius: 8px;
+}
+
+/* `.product-ribbon` used to sit here: a white label positioned over the card's
+   photo. It was removed rather than restyled — on a 96x96 phone thumbnail it
+   covered 42% of the image, and text laid over a photograph of someone else's
+   holiday reads as a sticker, not information. The same fact is now a chip in
+   the card body (`.badge.badge-brand`), which is legible at every width and
+   never hides the image. */
 
 .product-body { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
 
@@ -1579,7 +1595,10 @@ a.promo-card:hover {
   position: relative;
   height: 168px;
   overflow: hidden;
-  background: var(--bg-muted);
+  /* A dark base, not `--bg-muted`. White captions sit over this tile, so when an
+     image is missing or blocked the background must still be dark enough for
+     them to read. The previous light grey left white-on-grey at ~1.1:1 contrast. */
+  background: linear-gradient(135deg, var(--ink-700) 0%, var(--ink-900) 100%);
 }
 
 .destination-media img {
@@ -1590,10 +1609,29 @@ a.promo-card:hover {
   transform: scale(1.04);
 }
 
+/* Shown when the hero image is absent or failed to load. */
+.destination-fallback {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 40px;
+  font-weight: 700;
+}
+
 .destination-scrim {
   position: absolute;
   inset: 0;
-  background: linear-gradient(to top, rgba(4, 10, 24, 0.78) 0%, rgba(4, 10, 24, 0.18) 52%, transparent 100%);
+  /* Darker than a decorative gradient needs to be: it is load-bearing, because
+     the caption below it is white and may have no image behind it at all. */
+  background: linear-gradient(
+    to top,
+    rgba(4, 10, 24, 0.92) 0%,
+    rgba(4, 10, 24, 0.68) 34%,
+    rgba(4, 10, 24, 0.28) 62%,
+    rgba(4, 10, 24, 0.06) 100%
+  );
 }
 
 .destination-caption {
@@ -1611,7 +1649,7 @@ a.promo-card:hover {
 
 .destination-count {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.82);
+  color: rgba(255, 255, 255, 0.9);
 }
 
 /* ==========================================================================

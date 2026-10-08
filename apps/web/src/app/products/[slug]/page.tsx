@@ -7,6 +7,7 @@ import { BookingPanel } from '@/components/BookingPanel';
 import { AvailabilityCalendar } from '@/components/AvailabilityCalendar';
 import { ReviewSection } from '@/components/ReviewSection';
 import { SaveToWishlistButton } from '@/components/SaveToWishlistButton';
+import { SafeImage } from '@/components/SafeImage';
 import { resolveServerLocale } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 import type { LocaleCode } from '@/lib/i18n/config';
@@ -386,17 +387,23 @@ function Gallery({
   return (
     <div className="grid" style={{ gridTemplateColumns: '2fr 1fr', gap: 'var(--sp-3)' }}>
       <div style={{ position: 'relative', borderRadius: 'var(--r-lg)', overflow: 'hidden', minHeight: 380 }}>
-        <img src={hero.url} alt={hero.altText ?? name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        <SafeImage
+          src={hero.url}
+          alt={hero.altText ?? name}
+          loading="eager"
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+          fallback={<div className="img-fallback" aria-hidden>✦</div>}
+        />
       </div>
 
       <div className="grid" style={{ gap: 'var(--sp-3)', gridTemplateRows: '1fr 1fr' }}>
         {rest.slice(0, 2).map((image) => (
           <div key={image.url} style={{ borderRadius: 'var(--r-lg)', overflow: 'hidden' }}>
-            <img
+            <SafeImage
               src={image.url}
               alt={image.altText ?? name}
               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              loading="lazy"
+              fallback={<div className="img-fallback" aria-hidden>✦</div>}
             />
           </div>
         ))}

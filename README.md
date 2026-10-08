@@ -29,6 +29,7 @@ All eight domains are live, not sketched:
 | **Reviews & social** | Verified-purchase reviews, rating breakdown, merchant replies, helpful votes, save/remove journeys in the signed-in wishlist. |
 | **Loyalty & marketing** | Tiered points programme, earn on booking, redeem for credit, coupons (`WELCOME10`, `SAVE25`, `FIRSTTIMEBIG`), and **bilingual promo banners** an operator can create, schedule and place on the storefront without a deploy. |
 | **Itinerary & map** | Multi-day trip plans with geolocated stops, timezone-aware; customers can create plans and add confirmed bookings from their account. |
+| **Accounts & wallets** | Email-verified registration (a 6-digit code, stored only as a hash, single-use and attempt-capped; checkout is gated on it). Stored-value wallet with **top-up and withdrawal**, each writing a `WalletTransaction` so the balance is always explained by its statement. Saved payment methods are *references* — brand and last four, never a card number. |
 | **Operations backend** | Three separate surfaces (customer / operations / support), KPI dashboard, order/inventory tables, double-entry ledger (`GROSS_SALES`, `TAX_PAYABLE`, `PLATFORM_FEE`, `MERCHANT_PAYABLE`, `REFUNDS`, `MARKETING_FEE`), audit log. |
 
 The API smoke suite covers the booking lifecycle—search → detail → calendar → checkout →
@@ -175,7 +176,7 @@ The login page has one-click fill buttons for these accounts.
 > is an operations capability, and a partner merchant is a *data model* (`Merchant` still
 > owns inventory and settles commissions) rather than a permission. See
 > [`docs/adr/0002-two-staff-surfaces.md`](./docs/adr/0002-two-staff-surfaces.md).
-
+>
 > **Support sits *below* admin on purpose.** The cheapest way to stop an agent from
 > breaking pricing is to never let them reach it: `SUPPORT` cannot touch the catalogue,
 > pricing rules, inventory or staff accounts. Every support mutation writes an
@@ -418,6 +419,18 @@ answered travels on every item. See
 [`docs/supply-sources.md`](./docs/supply-sources.md) ("Real-time sources").
 **Products** — `GET /products/:slug`, `/products/:slug/availability`, `/products/:slug/nearby`
 **Auth** — `POST /auth/register`, `/auth/login`; `GET|PATCH /auth/me`; `POST /auth/travelers`
+**Email verification** — `POST /auth/verify-email` (6-digit code), `POST /auth/resend-verification`.
+Registration issues a code; a signed-in but unverified account is refused at
+`POST /orders` with `403 EMAIL_NOT_VERIFIED`.
+**Account & wallet** — `GET /account/overview`, `/account/payment-methods`,
+`/account/payment-channels`; `POST /account/payment-methods`.
+`GET /account/wallet` (balance + statement), `POST /account/wallet/top-up`,
+`POST /account/wallet/withdraw`. Amounts are integer minor units; both movements
+append a `WalletTransaction`.
+**Support chat** — `POST /support/conversations`, `GET /support/conversations/mine`,
+`GET /support/conversations/:id`, `POST /support/conversations/:id/messages` (shopper);
+`GET /support/inbox`, `/support/inbox/:id`, `POST /support/inbox/:id/messages`,
+`/support/inbox/:id/assign`, `/support/inbox/:id/close`, `/support/inbox/:id/reopen` (staff).
 **Orders** — `POST /orders`, `GET /orders`, `/orders/:id`, `/orders/lookup`,
 `POST /orders/:id/pay`, `GET /orders/:id/cancellation-quote`, `POST /orders/:id/cancel`
 **Cart** — `GET /cart`, `POST /cart/items`, `PATCH|DELETE /cart/items/:id`,
@@ -457,6 +470,8 @@ Operations: `GET /health`, `GET /ready` (per-dependency readiness).
 bash scripts/smoke-test.sh    # 102 checks, requires both services running
 bash scripts/mobile-check.sh  # 41 checks, responsive layer regression guard
 bash scripts/schema-audit.sh  # finds columns a seed writes but no route reads
+node scripts/check-images.mjs # every seed image URL must answer 200
+node scripts/check-i18n-keys.mjs # en/zh key parity, and no dangling t('…') keys
 pnpm typecheck                # strict TS across api + web
 pnpm --filter @easytrip/web build
 pnpm verify                   # typecheck + schema audit + contracts + smoke + realtime + mobile
@@ -471,6 +486,16 @@ and that a customer token cannot reach the staff support inbox.
 `supply:contract`, `inventory:contract`, `auth:contract` (a verification code is never
 stored in the clear; one failure message; checkout gating) and `support-chat:contract`
 (customer reads are always scoped by the token's user).
+
+Two cheaper gates guard failure modes that are invisible to `tsc`:
+
+- **`check:images`** HEAD-checks every image URL the seed writes. Thirteen of sixty-one
+  had silently 404'd, which is why destination tiles rendered as grey boxes; nothing in
+  the type system or the test suite could see it.
+- **`check:i18n`** asserts the `en` and `zh` dictionaries have identical key sets, and
+  that every `t('…')` literal in `app/` and `components/` exists. `translate()` falls back
+  to returning the key itself, so a typo renders as literal `nav.signIn` on the page —
+  visible to a human, invisible to the compiler.
 
 ### Browser audit and end-to-end chain
 

@@ -15,7 +15,18 @@ set -uo pipefail
 
 WEB_URL="${WEB_URL:-http://localhost:3000}"
 WEB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/apps/web"
-CSS_FILE="$(ls "$WEB_DIR"/.next/static/css/*.css 2>/dev/null | head -1)"
+
+# Every stylesheet the build emitted, concatenated into one scratch file.
+#
+# This used to be `ls *.css | head -1`, which assumed the build produces exactly
+# one stylesheet. Adding `next/font` broke that assumption: it emits its own CSS
+# (278 KB of @font-face rules) whose filename happens to sort first, so the
+# checks below were reading the *font* file and reporting every selector as
+# missing. Concatenating means the assertion matches what it actually means —
+# "the built CSS contains X" — regardless of how the build splits its output.
+CSS_FILE="$(mktemp)"
+trap 'rm -f "$CSS_FILE"' EXIT
+cat "$WEB_DIR"/.next/static/css/*.css > "$CSS_FILE" 2>/dev/null || true
 
 PASS=0
 FAIL=0

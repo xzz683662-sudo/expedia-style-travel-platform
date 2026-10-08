@@ -154,7 +154,6 @@ const IMAGES = {
     { id: 'photo-1436491865332-7a61a109cc05', alt: 'Passenger aircraft above a cloud layer at dusk' },
     { id: 'photo-1569154941061-e231b4725ef1', alt: 'Airliner cabin with a two-seat layout' },
     { id: 'photo-1542296332-2e4473faf563', alt: 'Aircraft on approach over a coastal city' },
-    { id: 'photo-1521727857535-28d2047619b6', alt: 'Airport terminal with a departure board' },
   ],
   hotel: [
     { id: 'photo-1566073771259-6a8506099945', alt: 'Hotel exterior with a lit terrace and pool' },
@@ -165,7 +164,6 @@ const IMAGES = {
   cruise: [
     { id: 'photo-1548574505-5e239809ee19', alt: 'Cruise ship at anchor in a calm sea' },
     { id: 'photo-1530789253388-582c481c54b0', alt: 'River cruise vessel passing a wooded bank' },
-    { id: 'photo-1543841464-62e3ac6436ac', alt: 'Ship deck with loungers facing the open sea' },
     { id: 'photo-1566847438217-76e82d383f84', alt: 'Harbour with a vessel preparing to depart' },
   ],
   guide: [
@@ -181,7 +179,6 @@ const IMAGES = {
     { id: 'photo-1552832230-c0197dd311b5', alt: 'Historic plaza with a domed church' },
   ],
   activity: [
-    { id: 'photo-1517821362941-f7f7532f7c5b', alt: 'Aerial view over a coastline at golden hour' },
     { id: 'photo-1469854523086-cc02fe5d8800', alt: 'Open road winding through mountain country' },
     { id: 'photo-1506905925346-21bda4d32df4', alt: 'Mountain range under a clear sky' },
     { id: 'photo-1502786129293-79981df4e689', alt: 'Vineyard terraces on a sunny hillside' },

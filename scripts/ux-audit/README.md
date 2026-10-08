@@ -53,17 +53,38 @@ application defect. Ticket QR images are served from our own origin through
 When a run fails, these answer *why* rather than *that*:
 
 ```bash
-node scripts/ux-audit/diagnose-overflow.mjs [path] [width]       # outermost offender, shallowest first
-node scripts/ux-audit/diagnose-wide-block.mjs [path] [width]     # grid/flex blocks whose min-content is too wide
-node scripts/ux-audit/diagnose-probe-fix.mjs [path] [width]      # try candidate CSS patches, report which one fixes it
-node scripts/ux-audit/diagnose-checkout-pay.mjs                  # drive checkout and log every API request/response
+# Layout
+node scripts/ux-audit/diagnose-overflow.mjs [path] [width]     # outermost offender, shallowest first
+node scripts/ux-audit/diagnose-wide-block.mjs [path] [width]   # grid/flex blocks whose min-content is too wide
+node scripts/ux-audit/diagnose-probe-fix.mjs [path] [width]    # try candidate CSS patches, report which fixes it
+node scripts/ux-audit/diagnose-card-ribbon.mjs                 # overlay coverage % on a card thumbnail
+node scripts/ux-audit/diagnose-styles.mjs                      # computed colours + contrast of low-contrast text
+
+# Behaviour
+node scripts/ux-audit/diagnose-checkout-pay.mjs                # drive checkout, log every API request/response
+node scripts/ux-audit/diagnose-date-input-locale.mjs           # does `lang` change a native date input?
+
+# Evidence for a change (screenshots + assertions)
+node scripts/ux-audit/capture-mobile.mjs                       # phone at successive scroll positions
+node scripts/ux-audit/capture-sections.mjs                     # per-section shots, sized to be readable
+node scripts/ux-audit/capture-proof.mjs                        # the new surfaces: verify step, banner, chat, inbox
+node scripts/ux-audit/verify-visual-fixes.mjs                  # broken images + CJK webfont, en/zh/mobile
+node scripts/ux-audit/verify-card-badge.mjs                    # nothing overlays the photo; chips are localised
+node scripts/ux-audit/verify-date-locale.mjs                   # date field is English on an English page
+node scripts/ux-audit/verify-wallet-ui.mjs                     # top-up / withdraw through the real form
 ```
 
-`diagnose-probe-fix.mjs` is the one worth reaching for first: it settles
-flexbox-min-content questions by asking the browser instead of reasoning about
-the spec. It measures `document.body.scrollWidth`, not `documentElement`'s —
-`body` sets `overflow-x: hidden`, so the document element always reports the
-viewport width and proves nothing.
+Image URLs are checked separately, from the seed rather than the browser:
+
+```bash
+node scripts/check-images.mjs                  # HEAD-check every seed image URL
+node scripts/resolve-replacement-images.mjs    # resolve AND verify a replacement from Wikipedia
+```
+
+`diagnose-probe-fix.mjs` is the one worth reaching for first: it settles flexbox-min-content
+questions by asking the browser instead of reasoning about the spec. It measures
+`document.body.scrollWidth`, not `documentElement`'s — `body` sets `overflow-x: hidden`, so
+the document element always reports the viewport width and proves nothing.
 
 ## Defects this suite has already found
 
@@ -76,3 +97,14 @@ viewport width and proves nothing.
   children sized to their *max-content* (~540px on a 393px viewport) and `body`'s
   `overflow-x: hidden` hid the excess instead of scrolling it. Fixed at the root
   with `align-items: stretch` in the same media query.
+- **A white label over the card photo.** `.product-ribbon` covered **42%** of the
+  thumbnail on a phone (96×96 media, 88×44 ribbon, three wrapped lines) because
+  it was sized for the desktop layout. Removed rather than restyled — the fact is
+  now a chip in the card body.
+- **Thirteen dead image URLs.** Not found by this suite but by `check:images`:
+  seed media was never requested by anything, so 404s rendered as grey boxes
+  indefinitely. The `error`-severity broken-image rule above is what would have
+  caught them had a check existed; now one does.
+- **`mobile-check.sh` read only the first stylesheet.** Adding `next/font` made
+  the build emit a second CSS file that sorted first, so 21 selector assertions
+  reported "missing" against a healthy build. Fixed to concatenate all of them.

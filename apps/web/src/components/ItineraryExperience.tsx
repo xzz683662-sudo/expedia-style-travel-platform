@@ -6,6 +6,7 @@ import { ApiError, api, type Itinerary, type OrderSummary } from '@/lib/api';
 import { readToken } from '@/lib/session';
 import { formatDate, formatMoney } from '@/lib/format';
 import type { LocaleCode } from '@/lib/i18n/config';
+import { htmlLang } from '@/lib/i18n/config';
 import { createTranslator } from '@/lib/i18n/dictionaries';
 
 export function ItineraryExperience({ locale }: { locale: LocaleCode }) {
@@ -125,11 +126,11 @@ export function ItineraryExperience({ locale }: { locale: LocaleCode }) {
           </label>
           <label className="field">
             <span>{t('travel.startDate')}</span>
-            <input type="date" value={startDate} max={endDate || undefined} onChange={(event) => setStartDate(event.target.value)} />
+            <input type="date" lang={htmlLang(locale)} value={startDate} max={endDate || undefined} onChange={(event) => setStartDate(event.target.value)} />
           </label>
           <label className="field">
             <span>{t('travel.endDate')}</span>
-            <input type="date" value={endDate} min={startDate || undefined} onChange={(event) => setEndDate(event.target.value)} />
+            <input type="date" lang={htmlLang(locale)} value={endDate} min={startDate || undefined} onChange={(event) => setEndDate(event.target.value)} />
           </label>
         </div>
         <div>

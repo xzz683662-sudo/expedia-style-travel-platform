@@ -104,7 +104,12 @@ export type SearchHit = {
   destinationName: string | null;
   countryCode: string | null;
   distanceKm: number | null;
-  badge: string | null;
+  /**
+   * A highlight code, not display copy. The API decides *what* is true about a
+   * product; the dictionaries decide how to say it, which is what keeps a
+   * Chinese card from showing English words.
+   */
+  badgeCode: 'PRIORITY_ENTRY' | 'PRIVATE_DEPARTURE' | 'INSTANT_CONFIRMATION' | null;
   tags: string[];
   /**
    * Category-specific facts from the API, so a card can show a flight's route
@@ -273,7 +278,7 @@ export type ProductDetail = {
     currency: string;
     ratingAvg: number;
     ratingCount: number;
-    badge: string | null;
+    badgeCode: 'PRIORITY_ENTRY' | 'PRIVATE_DEPARTURE' | 'INSTANT_CONFIRMATION' | null;
   }[];
 };
 
@@ -762,6 +767,24 @@ export type SavedPaymentMethod = {
   createdAt: string;
 };
 
+/**
+ * One movement on the stored-value balance.
+ *
+ * `kind` distinguishes a shopper-funded top-up from a platform credit, which is
+ * why the statement labels it rather than showing the note alone: "Top-up" and
+ * "Adjustment" mean very different things to the person reading it.
+ */
+export type WalletEntry = {
+  id: string;
+  kind: 'TOP_UP' | 'WITHDRAWAL' | 'CREDIT' | 'DEBIT' | 'REFUND' | 'ADJUSTMENT' | 'REVERSAL';
+  amountCents: number;
+  currency: string;
+  balanceAfterCents: number;
+  note: string | null;
+  orderId: string | null;
+  createdAt: string;
+};
+
 export type PaymentChannelOption = {
   channel: string;
   /** What the channel needs before it can be saved. */
@@ -954,6 +977,31 @@ export const api = {
       '/account/payment-channels',
       { token, cache: 'no-store' },
     ),
+
+  // --- Stored-value balance (top-up / withdraw) ---
+  wallet: (token: string) =>
+    request<{
+      balanceCents: number;
+      enabled: boolean;
+      currency: string;
+      entries: WalletEntry[];
+    }>('/account/wallet', { token, cache: 'no-store' }),
+
+  /** 充值 — adds spendable credit. */
+  topUpWallet: (token: string, body: { amountCents: number; channel: 'CARD' | 'PAYPAL' | 'CRYPTO_TRC20' }) =>
+    request<{ balanceCents: number; transactionId: string; currency: string }>('/account/wallet/top-up', {
+      method: 'POST',
+      body,
+      token,
+    }),
+
+  /** 取现 — pays credit back out. */
+  withdrawWallet: (token: string, body: { amountCents: number; destination: string }) =>
+    request<{ balanceCents: number; transactionId: string; currency: string }>('/account/wallet/withdraw', {
+      method: 'POST',
+      body,
+      token,
+    }),
 
   // --- Checkout & orders ---
   createOrder: (body: {
